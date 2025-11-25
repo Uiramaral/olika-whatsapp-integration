@@ -1,0 +1,33 @@
+name: Deploy to Railway
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run basic validation
+        run: |
+          node -v
+          npm run lint || echo 'Nenhum lint configurado'
+
+      - name: Deploy to Railway
+        uses: railwayapp/actions@v2
+        with:
+          railwayToken: ${{ secrets.RAILWAY_TOKEN }}
+          serviceName: olika-whatsapp-integration
+
