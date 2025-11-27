@@ -4,8 +4,6 @@ const path = require('path');
 const fs = require('fs');
 
 const AUTH_PATH = path.resolve(__dirname, '../../auth_info_baileys');
-
-// Número para pareamento (injetado via script)
 const PAIRING_NUMBER = '5571987019420'; 
 
 const connectToWhatsApp = async () => {
@@ -19,10 +17,12 @@ const connectToWhatsApp = async () => {
             keys: makeCacheableSignalKeyStore(state.keys, logger),
         },
         logger: logger,
-        printQRInTerminal: false, // QR Code desligado
+        printQRInTerminal: false,
         mobile: false, 
-        browser: ["Olika Delivery", "Chrome", "1.0.0"],
+        // TRUQUE: Mudamos para Ubuntu/Chrome para parecer um servidor Linux padrão
+        browser: ["Ubuntu", "Chrome", "20.0.04"], 
         connectTimeoutMs: 60000,
+        retryRequestDelayMs: 2000, // Tenta reconectar mais rápido se falhar
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -33,39 +33,38 @@ const connectToWhatsApp = async () => {
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) {
-                logger.warn('Reconectando...');
+                logger.warn('Conexão caiu. Reconectando...');
                 setTimeout(connectToWhatsApp, 3000);
             } else {
-                logger.error('Sessão encerrada. Reinicie o volume se necessário.');
-                process.exit(1);
+                logger.error('Logout detectado. Necessário limpar volume.');
+                process.exit(1); 
             }
         } else if (connection === 'open') {
-            console.log('\n\n   CONECTADO COM SUCESSO!   \n\n');
+            console.log('\n\n? ? ? CONECTADO COM SUCESSO! ? ? ?\n\n');
         }
     });
 
-    // Lógica do Código de Pareamento
+    // Pede o código apenas se não estiver registrado
     if (!sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
-                // Formata numero para garantir compatibilidade
                 let phoneNumber = PAIRING_NUMBER.replace(/[^0-9]/g, '');
-                
                 console.log('\n\nREQUESTING PAIRING CODE FOR: ' + phoneNumber);
+                
                 const code = await sock.requestPairingCode(phoneNumber);
                 
                 console.log('===================================================');
-                console.log(' SEU CÓDIGO DE PAREAMENTO: ' + code);
+                console.log('? SEU CÓDIGO DE PAREAMENTO: ' + code);
                 console.log('===================================================\n\n');
             } catch (err) {
-                console.log('Erro ao pedir código: ', err);
+                console.log('Erro ao pedir código (verifique se o número está correto): ', err);
             }
-        }, 5000); // Aguarda 5s para garantir conexão inicial
+        }, 6000); // Espera 6s para garantir estabilidade
     }
 };
 
 const sendMessage = async (number, message) => {
-    return { status: 'service running' };
+    return { status: 'running' };
 };
 
 connectToWhatsApp();
