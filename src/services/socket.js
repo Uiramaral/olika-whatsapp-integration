@@ -13,10 +13,9 @@ const connectToWhatsApp = async () => {
     sock = makeWASocket({
         printQRInTerminal: true,
         auth: state,
-        logger: logger,
+        logger: logger, // Passando o Pino logger
         browser: ["Olika Delivery", "Chrome", "1.0.0"],
-        // Aumentar timeout para evitar desconexões instáveis
-        connectTimeoutMs: 60000, 
+        connectTimeoutMs: 60000,
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -25,7 +24,7 @@ const connectToWhatsApp = async () => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            logger.info(' QR Code gerado. VERIFIQUE OS LOGS DO RAILWAY.');
+            logger.info('? QR Code gerado. VERIFIQUE OS LOGS DO RAILWAY.');
         }
 
         if (connection === 'close') {
@@ -45,15 +44,12 @@ const connectToWhatsApp = async () => {
 const sendMessage = async (number, text) => {
     if (!sock) throw new Error('WhatsApp ainda não inicializou.');
     
-    // Tratamento básico do número BR (55 + DDD + 9 + numero)
     let id = number.replace(/\D/g, ''); 
     if (!id.includes('@s.whatsapp.net')) {
         id = `${id}@s.whatsapp.net`;
     }
     
-    // Verifica conexão antes de tentar
     await sock.presenceSubscribe(id);
-    
     await sock.sendMessage(id, { text });
     return { status: 'enviado', to: id };
 };

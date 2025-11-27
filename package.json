@@ -1,21 +1,17 @@
 {
   "name": "olika-whatsapp-gateway",
   "version": "1.0.0",
-  "description": "Gateway WhatsApp para HostGator/Laravel",
+  "description": "Gateway WhatsApp",
   "main": "src/app.js",
   "scripts": {
-    "start": "node src/app.js",
-    "dev": "nodemon src/app.js"
+    "start": "node src/app.js"
   },
-  "keywords": [],
-  "author": "Olika",
-  "license": "ISC",
   "dependencies": {
     "@whiskeysockets/baileys": "^6.5.0",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "qrcode-terminal": "^0.12.0",
-    "winston": "^3.11.0"
+    "pino": "^8.16.1",
+    "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

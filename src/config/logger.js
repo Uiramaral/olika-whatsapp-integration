@@ -1,16 +1,9 @@
-const winston = require('winston');
+const pino = require('pino');
 
-const logger = winston.createLogger({
-    level: 'info',
-    format: winston.format.combine(
-        winston.format.timestamp(),
-        winston.format.printf(({ timestamp, level, message }) => {
-            return `[${timestamp}] ${level.toUpperCase()}: ${message}`;
-        })
-    ),
-    transports: [
-        new winston.transports.Console()
-    ]
+const logger = pino({
+    level: 'info', // Nivel padrao
+    // Baileys exige trace/debug, o Pino gerencia isso nativamente
+    timestamp: () => `,"time":"${new Date().toISOString()}"`
 });
 
 module.exports = logger;
