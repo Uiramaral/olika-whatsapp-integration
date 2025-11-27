@@ -6,7 +6,7 @@ const fs = require('fs');
 const AUTH_PATH = path.resolve(__dirname, '../../auth_info_baileys');
 
 // Número para pareamento (injetado via script)
-const PAIRING_NUMBER = '557187019420'; 
+const PAIRING_NUMBER = '5571987019420'; 
 
 const connectToWhatsApp = async () => {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
