@@ -1,5 +1,6 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const logger = require('../config/logger');
+const qrcode = require('qrcode-terminal'); // Biblioteca para desenhar o QR
 const path = require('path');
 const fs = require('fs');
 
@@ -11,11 +12,13 @@ const connectToWhatsApp = async () => {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
 
     sock = makeWASocket({
-        printQRInTerminal: true,
+        // REMOVIDO: printQRInTerminal: true (Isso não funciona mais)
         auth: state,
-        logger: logger, // Passando o Pino logger
+        logger: logger,
         browser: ["Olika Delivery", "Chrome", "1.0.0"],
         connectTimeoutMs: 60000,
+        // Configuração para evitar erros de "noise"
+        syncFullHistory: false
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -23,17 +26,25 @@ const connectToWhatsApp = async () => {
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
+        // --- CORREÇÃO: Desenhar QR Code Manualmente ---
         if (qr) {
-            logger.info(' QR Code gerado. VERIFIQUE OS LOGS DO RAILWAY.');
+            logger.info(' QR Code recebido. Gerando abaixo:');
+            // small: true garante que o QR caiba na tela do log
+            qrcode.generate(qr, { small: true }); 
         }
+        // ----------------------------------------------
 
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            logger.error(`Conexão fechada. Reconectando: ${shouldReconnect}`);
+            
             if (shouldReconnect) {
-                connectToWhatsApp();
+                logger.warn('Conexão instável. Tentando reconectar em 5 segundos...');
+                // Adiciona um delay de 5s para não "spammar" o log
+                setTimeout(connectToWhatsApp, 5000);
             } else {
                 logger.error('Sessão encerrada (Logout). Necessário apagar a pasta auth no volume.');
+                // Encerra o processo para o Docker reiniciar limpo se necessário
+                process.exit(1);
             }
         } else if (connection === 'open') {
             logger.info(' Conectado ao WhatsApp com sucesso!');
