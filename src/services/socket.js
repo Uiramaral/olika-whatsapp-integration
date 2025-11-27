@@ -24,7 +24,7 @@ const connectToWhatsApp = async () => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            logger.info('? QR Code gerado. VERIFIQUE OS LOGS DO RAILWAY.');
+            logger.info(' QR Code gerado. VERIFIQUE OS LOGS DO RAILWAY.');
         }
 
         if (connection === 'close') {
