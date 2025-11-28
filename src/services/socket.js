@@ -3,44 +3,60 @@ const logger = require('../config/logger');
 const path = require('path');
 const fs = require('fs');
 
-// Número de Pareamento: Usado para isolar a sessão no disco
 const PAIRING_NUMBER = '5571987019420'; 
 const AUTH_PATH = path.resolve(__dirname, '..', '..', 'auth_info_baileys', PAIRING_NUMBER); 
 
-const connectToWhatsApp = async () => {
-    //  ATENÇÃO: A pasta auth_info_baileys/5571987019420 deve ser o Volume do Railway!
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
-    const { version } = await fetchLatestBaileysVersion();
+let heartbeatInterval = null;
 
-    const sock = makeWASocket({
-        version,
-        auth: {
-            creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, logger),
-        },
+const connectToWhatsApp = async () => {
+    // Para ambientes headless, historySync: false reduz a carga e melhora o tempo de conexão.
+    const socketConfig = {
         logger: logger,
         printQRInTerminal: false,
         mobile: false, 
         browser: ["Ubuntu", "Chrome", "20.0.04"], 
         connectTimeoutMs: 60000,
         retryRequestDelayMs: 2000, 
-    });
+        syncFullHistory: false, // Confirma que a sincronização completa está desabilitada
+        getMessage: async (key) => { return { conversation: 'Fallback Message' }; } // Fallback de mensagem
+    };
 
-    // CORREÇÃO CRÍTICA: Sincronização e Delay após salvar (evita erro 515)
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
+    const { version } = await fetchLatestBaileysVersion();
+    
+    socketConfig.version = version;
+    socketConfig.auth = {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger),
+    };
+
+    const sock = makeWASocket(socketConfig);
+
+    // OTIMIZAÇÃO: Delay de 2s para garantir o flush completo no disco (evitando erro 515)
     sock.ev.on('creds.update', async () => { 
         await saveCreds(); 
-        // Espera 1.5s para garantir que o disco finalizou a escrita (flush)
-        await new Promise(r => setTimeout(r, 1500)); 
+        await new Promise(r => setTimeout(r, 2000)); 
     });
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, isNewLogin } = update;
 
-        if (isNewLogin) {
-            console.log('\n\n? NOVO LOGIN: Conectado com sucesso e credenciais salvas! ?\n\n');
+        // OTIMIZAÇÃO: Heartbeat Ping para manter o WebSocket ativo
+        if (connection === 'open') {
+            console.log('\n\n   CONECTADO COM SUCESSO!   \n\n');
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
+            // Envia um ping a cada 20 segundos para evitar que o servidor do WhatsApp desconecte por inatividade
+            heartbeatInterval = setInterval(() => {
+                if (sock.ws.readyState === sock.ws.OPEN) {
+                    sock.ws.send(' '); 
+                }
+            }, 20000); 
         }
 
         if (connection === 'close') {
+            // Se cair, limpa o heartbeat
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
+
             const statusCode = lastDisconnect.error?.output?.statusCode;
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
             
@@ -48,10 +64,8 @@ const connectToWhatsApp = async () => {
                 logger.warn('Conexão instável. Tentando reconectar em 5 segundos...');
                 setTimeout(connectToWhatsApp, 5000);
             } else {
-                logger.error('Logout detectado. O processo irá encerrar. Limpe o Volume e reinicie o serviço para gerar um novo código.');
+                logger.error('Logout detectado. O processo irá encerrar. Limpe o Volume e reinicie o servio para gerar um novo cdigo.');
             }
-        } else if (connection === 'open') {
-             console.log('\n\n   CONECTADO COM SUCESSO!   \n\n');
         }
     });
 
