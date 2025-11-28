@@ -1,107 +1,100 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys');
-const logger = require('../config/logger');
-const path = require('path');
-const fs = require('fs');
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
+import P from "pino";
+import { Boom } from "@hapi/boom";
 
-const PAIRING_NUMBER = '5571987019420'; 
-const AUTH_PATH = path.resolve(__dirname, '..', '..', 'auth_info_baileys', PAIRING_NUMBER); 
+const startSock = async () => {
+  const { state, saveCreds } = await useMultiFileAuthState("./auth_info_baileys");
+  const logger = P({ level: "info" });
 
-let heartbeatInterval = null;
-let lastConnected = null; // Para logging do Uptime
+  let sock = makeWASocket({
+    logger,
+    printQRInTerminal: true,
+    auth: state,
+    syncFullHistory: false,
+    browser: ["Ubuntu", "Chrome", "20.0.04"],
+    markOnlineOnConnect: true,
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000
+  });
 
-const connectToWhatsApp = async () => {
-    // Configuraes explcitas e otimizadas para ambientes headless
-    const socketConfig = {
-        logger: logger,
-        printQRInTerminal: false,
-        mobile: false, 
-        browser: ["Ubuntu", "Chrome", "20.0.04"], 
-        connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 60000, 
-        retryRequestDelayMs: 2000, 
-        syncFullHistory: false, 
-        markOnlineOnConnect: true,
-        getMessage: async (key) => { return { conversation: 'Fallback Message' }; }
-    };
+  let lastConnected = null;
+  let reconnectAttempts = 0;
+  let heartbeatInterval = null;
 
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
-    const { version } = await fetchLatestBaileysVersion();
-    
-    socketConfig.version = version;
-    socketConfig.auth = {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, logger),
-    };
-
-    const sock = makeWASocket(socketConfig);
-
-    // OTIMIZAO: Delay de 2s para garantir o flush completo no disco (evitando erro 515)
-    sock.ev.on('creds.update', async () => { 
-        await saveCreds(); 
-        await new Promise(r => setTimeout(r, 2000)); 
-    });
-
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, isNewLogin } = update;
-
-        // OTIMIZAO: Heartbeat Ping e Logging do Uptime
-        if (connection === 'open') {
-            lastConnected = Date.now();
-            console.log('\n\n   CONECTADO COM SUCESSO!   \n\n');
-            if (heartbeatInterval) clearInterval(heartbeatInterval);
-            
-            // Heartbeat: Envia um ping a cada 20 segundos para evitar timeout (Keep-Alive)
-            heartbeatInterval = setInterval(() => {
-                if (sock.ws.readyState === 1) { // 1 = OPEN
-                    sock.ws.send(' '); 
-                }
-            }, 20000); 
+  // 🔁 Heartbeat: mantém conexão ativa no Railway
+  const startHeartbeat = () => {
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
+    heartbeatInterval = setInterval(() => {
+      try {
+        if (sock?.ws?.readyState === 1) {
+          sock.ws.send("ping");
+          logger.info("💓 Heartbeat enviado para manter conexão viva");
         }
+      } catch (err) {
+        logger.warn("Falha ao enviar heartbeat:", err.message);
+      }
+    }, 20000);
+  };
 
-        if (connection === 'close') {
-            if (heartbeatInterval) clearInterval(heartbeatInterval);
+  // 🧠 Reconector com backoff progressivo
+  const reconnect = async () => {
+    reconnectAttempts++;
+    const delay = Math.min(30000, 5000 * reconnectAttempts);
+    logger.warn(`Conexão instável. Tentando reconectar em ${delay / 1000}s (tentativa ${reconnectAttempts})...`);
+    await new Promise(r => setTimeout(r, delay));
+    startSock();
+  };
 
+<<<<<<< HEAD
             // CORREO E LOGGING DO UPTIME
             if (lastConnected) {
                 const uptime = ((Date.now() - lastConnected) / 1000 / 60).toFixed(1);
                 // FIX DE SINTAXE: Template string correto para evitar o SyntaxError
                 console.log( Desconectado aps  minutos online.);
             }
+=======
+  // 📡 Eventos principais
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect } = update;
+>>>>>>> 061364c4aa9495cc0f9c664e11daf8c109e45ba1
 
-            const statusCode = lastDisconnect.error?.output?.statusCode;
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-            
-            if (shouldReconnect) {
-                // OTIMIZAO: Aumenta o delay de reconexo para 10 segundos
-                logger.warn('Conex�o inst�vel. Tentando reconectar em 10 segundos...');
-                setTimeout(connectToWhatsApp, 10000); // 10s fixos
-            } else {
-                logger.error('Logout detectado. O processo ir encerrar. Limpe o Volume e reinicie o servio para gerar um novo cdigo.');
-            }
-        }
-    });
-
-    if (!sock.authState.creds.registered) {
-        setTimeout(async () => {
-            try {
-                let phoneNumber = PAIRING_NUMBER.replace(/[^0-9]/g, '');
-                console.log('\n\nREQUESTING PAIRING CODE FOR: ' + phoneNumber);
-                const code = await sock.requestPairingCode(phoneNumber);
-                
-                console.log('===================================================');
-                console.log(' SEU C�DIGO DE PAREAMENTO: ' + code);
-                console.log('===================================================\n\n');
-            } catch (err) {
-                console.log('Erro ao pedir c�digo: ', err);
-            }
-        }, 6000);
+    if (connection === "open") {
+      reconnectAttempts = 0;
+      lastConnected = Date.now();
+      logger.info("🟢 Conectado ao WhatsApp.");
+      startHeartbeat();
     }
+
+    if (connection === "close") {
+      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      const uptime = lastConnected ? ((Date.now() - lastConnected) / 60000).toFixed(1) : "0";
+      logger.warn(`🔴 Desconectado após ${uptime} minutos online. Motivo: ${reason}`);
+
+      if (reason === DisconnectReason.loggedOut) {
+        logger.error("❌ Sessão encerrada. É necessário novo pareamento (QR Code).");
+      } else {
+        reconnect();
+      }
+    }
+  });
+
+  // 🔐 Evento de credenciais salvas
+  sock.ev.on("creds.update", async () => {
+    await saveCreds();
+    logger.info("✅ Credenciais salvas com sucesso.");
+  });
+
+  // 🧱 Tratamento global de erros
+  process.on("uncaughtException", (err) => {
+    logger.error("Erro não tratado:", err);
+  });
+
+  process.on("unhandledRejection", (reason) => {
+    logger.error("Promise rejeitada sem tratamento:", reason);
+  });
 };
 
-const sendMessage = async (number, message) => {
-    return { status: 'running' };
-};
-
-connectToWhatsApp();
-
-module.exports = { sendMessage, client: () => {} };
+// 🚀 Inicialização
+startSock()
+  .then(() => console.log("🚀 Servidor WhatsApp iniciado com sucesso."))
+  .catch((err) => console.error("Erro ao iniciar o socket:", err));
