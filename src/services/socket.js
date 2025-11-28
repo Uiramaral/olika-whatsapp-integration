@@ -64,7 +64,7 @@ const connectToWhatsApp = async () => {
             // CORREO E LOGGING DO UPTIME
             if (lastConnected) {
                 const uptime = ((Date.now() - lastConnected) / 1000 / 60).toFixed(1);
-                // FIX DE SINTAXE APLICADO AQUI: Uso correto da template string
+                // FIX DE SINTAXE: Template string correto para evitar o SyntaxError
                 console.log( Desconectado aps  minutos online.);
             }
 
