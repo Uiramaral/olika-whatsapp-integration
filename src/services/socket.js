@@ -17,7 +17,7 @@ const connectToWhatsApp = async () => {
         mobile: false, 
         browser: ["Ubuntu", "Chrome", "20.0.04"], 
         connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 60000, // Tempo limite para consultas
+        defaultQueryTimeoutMs: 60000, 
         retryRequestDelayMs: 2000, 
         syncFullHistory: false, // Desabilita sincronizao pesada
         markOnlineOnConnect: true,
@@ -53,7 +53,7 @@ const connectToWhatsApp = async () => {
             // Heartbeat: Envia um ping a cada 20 segundos para evitar timeout (Keep-Alive)
             heartbeatInterval = setInterval(() => {
                 if (sock.ws.readyState === 1) { // 1 = OPEN
-                    // sock.ws.send(' '); um pequeno payload para manter o frame ativo
+                    // Usando um payload simples para manter o frame ativo
                     sock.ws.send(' '); 
                 }
             }, 20000); 
@@ -62,9 +62,10 @@ const connectToWhatsApp = async () => {
         if (connection === 'close') {
             if (heartbeatInterval) clearInterval(heartbeatInterval);
 
-            // Logging do Uptime
+            // CORREO E LOGGING DO UPTIME
             if (lastConnected) {
                 const uptime = ((Date.now() - lastConnected) / 1000 / 60).toFixed(1);
+                // CORREO DE SINTAXE: Usando template string
                 console.log( Desconectado aps  minutos online.);
             }
 
