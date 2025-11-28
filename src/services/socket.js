@@ -1,100 +1,81 @@
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
-import P from "pino";
-import { Boom } from "@hapi/boom";
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys');
+const logger = require('../config/logger');
+const path = require('path');
+const fs = require('fs');
 
-const startSock = async () => {
-  const { state, saveCreds } = await useMultiFileAuthState("./auth_info_baileys");
-  const logger = P({ level: "info" });
+// Número de Pareamento: Usado para isolar a sessão no disco
+const PAIRING_NUMBER = '5571987019420'; 
+const AUTH_PATH = path.resolve(__dirname, '..', '..', 'auth_info_baileys', PAIRING_NUMBER); 
 
-  let sock = makeWASocket({
-    logger,
-    printQRInTerminal: true,
-    auth: state,
-    syncFullHistory: false,
-    browser: ["Ubuntu", "Chrome", "20.0.04"],
-    markOnlineOnConnect: true,
-    connectTimeoutMs: 60000,
-    defaultQueryTimeoutMs: 60000
-  });
+const connectToWhatsApp = async () => {
+    // ?? ATENÇÃO: A pasta auth_info_baileys/5571987019420 deve ser o Volume do Railway!
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
+    const { version } = await fetchLatestBaileysVersion();
 
-  let lastConnected = null;
-  let reconnectAttempts = 0;
-  let heartbeatInterval = null;
+    const sock = makeWASocket({
+        version,
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, logger),
+        },
+        logger: logger,
+        printQRInTerminal: false,
+        mobile: false, 
+        browser: ["Ubuntu", "Chrome", "20.0.04"], 
+        connectTimeoutMs: 60000,
+        retryRequestDelayMs: 2000, 
+    });
 
-  // ðŸ” Heartbeat: mantÃ©m conexÃ£o ativa no Railway
-  const startHeartbeat = () => {
-    if (heartbeatInterval) clearInterval(heartbeatInterval);
-    heartbeatInterval = setInterval(() => {
-      try {
-        if (sock?.ws?.readyState === 1) {
-          sock.ws.send("ping");
-          logger.info("ðŸ’“ Heartbeat enviado para manter conexÃ£o viva");
+    // CORREÇÃO CRÍTICA: Sincronização e Delay após salvar (evita erro 515)
+    sock.ev.on('creds.update', async () => { 
+        await saveCreds(); 
+        // Espera 1.5s para garantir que o disco finalizou a escrita (flush)
+        await new Promise(r => setTimeout(r, 1500)); 
+    });
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, isNewLogin } = update;
+
+        if (isNewLogin) {
+            console.log('\n\n NOVO LOGIN: Conectado com sucesso e credenciais salvas! \n\n');
         }
-      } catch (err) {
-        logger.warn("Falha ao enviar heartbeat:", err.message);
-      }
-    }, 20000);
-  };
 
-  // ðŸ§  Reconector com backoff progressivo
-  const reconnect = async () => {
-    reconnectAttempts++;
-    const delay = Math.min(30000, 5000 * reconnectAttempts);
-    logger.warn(`ConexÃ£o instÃ¡vel. Tentando reconectar em ${delay / 1000}s (tentativa ${reconnectAttempts})...`);
-    await new Promise(r => setTimeout(r, delay));
-    startSock();
-  };
-
-<<<<<<< HEAD
-            // CORREO E LOGGING DO UPTIME
-            if (lastConnected) {
-                const uptime = ((Date.now() - lastConnected) / 1000 / 60).toFixed(1);
-                // FIX DE SINTAXE: Template string correto para evitar o SyntaxError
-                console.log( Desconectado aps  minutos online.);
+        if (connection === 'close') {
+            const statusCode = lastDisconnect.error?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            
+            if (shouldReconnect) {
+                logger.warn('Conexão instável. Tentando reconectar em 5 segundos...');
+                setTimeout(connectToWhatsApp, 5000);
+            } else {
+                logger.error('Logout detectado. O processo irá encerrar. Limpe o Volume e reinicie o serviço para gerar um novo código.');
             }
-=======
-  // ðŸ“¡ Eventos principais
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect } = update;
->>>>>>> 061364c4aa9495cc0f9c664e11daf8c109e45ba1
+        } else if (connection === 'open') {
+             console.log('\n\n   CONECTADO COM SUCESSO!   \n\n');
+        }
+    });
 
-    if (connection === "open") {
-      reconnectAttempts = 0;
-      lastConnected = Date.now();
-      logger.info("ðŸŸ¢ Conectado ao WhatsApp.");
-      startHeartbeat();
+    if (!sock.authState.creds.registered) {
+        setTimeout(async () => {
+            try {
+                let phoneNumber = PAIRING_NUMBER.replace(/[^0-9]/g, '');
+                console.log('\n\nREQUESTING PAIRING CODE FOR: ' + phoneNumber);
+                const code = await sock.requestPairingCode(phoneNumber);
+                
+                console.log('===================================================');
+                console.log(' SEU CÓDIGO DE PAREAMENTO: ' + code);
+                console.log('===================================================\n\n');
+            } catch (err) {
+                console.log('Erro ao pedir código: ', err);
+            }
+        }, 6000);
     }
-
-    if (connection === "close") {
-      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      const uptime = lastConnected ? ((Date.now() - lastConnected) / 60000).toFixed(1) : "0";
-      logger.warn(`ðŸ”´ Desconectado apÃ³s ${uptime} minutos online. Motivo: ${reason}`);
-
-      if (reason === DisconnectReason.loggedOut) {
-        logger.error("âŒ SessÃ£o encerrada. Ã‰ necessÃ¡rio novo pareamento (QR Code).");
-      } else {
-        reconnect();
-      }
-    }
-  });
-
-  // ðŸ” Evento de credenciais salvas
-  sock.ev.on("creds.update", async () => {
-    await saveCreds();
-    logger.info("âœ… Credenciais salvas com sucesso.");
-  });
-
-  // ðŸ§± Tratamento global de erros
-  process.on("uncaughtException", (err) => {
-    logger.error("Erro nÃ£o tratado:", err);
-  });
-
-  process.on("unhandledRejection", (reason) => {
-    logger.error("Promise rejeitada sem tratamento:", reason);
-  });
 };
 
-// ðŸš€ InicializaÃ§Ã£o
-startSock()
-  .then(() => console.log("ðŸš€ Servidor WhatsApp iniciado com sucesso."))
-  .catch((err) => console.error("Erro ao iniciar o socket:", err));
+const sendMessage = async (number, message) => {
+    return { status: 'running' };
+};
+
+connectToWhatsApp();
+
+module.exports = { sendMessage, client: () => {} };
