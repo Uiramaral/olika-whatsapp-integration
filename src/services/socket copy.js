@@ -3,18 +3,15 @@
  * Estável e otimizado para Railway / Baileys 6.6+
  */
 
-const {
-  default: makeWASocket,
+import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-} = require("@whiskeysockets/baileys");
-const P = require("pino");
-const { Boom } = require("@hapi/boom");
+} from "@whiskeysockets/baileys";
+import P from "pino";
+import { Boom } from "@hapi/boom";
 
 const SESSION_PATH = "./auth_info_baileys/5571987019420";
-
-let globalSock = null;
 
 const startSock = async () => {
   const { version } = await fetchLatestBaileysVersion();
@@ -78,7 +75,6 @@ const startSock = async () => {
       lastConnected = Date.now();
       logger.info("✅ Conectado com sucesso ao WhatsApp!");
       startHeartbeat();
-      globalSock = sock; // Atualizar referência global
     }
 
     if (connection === "close") {
@@ -118,7 +114,6 @@ const startSock = async () => {
     logger.error("Promise rejeitada sem tratamento:", reason);
   });
 
-  globalSock = sock;
   return sock;
 };
 
@@ -131,63 +126,3 @@ const startSock = async () => {
     console.error("❌ Falha ao iniciar o socket:", err);
   }
 })();
-
-/**
- * Envia mensagem via WhatsApp
- * @param {string} phone - Número do telefone (formato: 5511999999999 ou 5511999999999@s.whatsapp.net)
- * @param {string} message - Mensagem a ser enviada
- * @returns {Promise<{success: boolean, messageId?: string, error?: string}>}
- */
-const sendMessage = async (phone, message) => {
-  if (!globalSock) {
-    throw new Error('Socket não está conectado. Aguarde a conexão ser estabelecida.');
-  }
-  
-  if (!phone || !message) {
-    throw new Error('Phone e message são obrigatórios');
-  }
-  
-  // Normalizar número de telefone
-  let normalizedPhone = phone.replace(/\D/g, ''); // Remove caracteres não numéricos
-  
-  // Se não terminar com @s.whatsapp.net, adicionar
-  if (!phone.includes('@s.whatsapp.net')) {
-    normalizedPhone = `${normalizedPhone}@s.whatsapp.net`;
-  } else {
-    normalizedPhone = phone;
-  }
-  
-  try {
-    const result = await globalSock.sendMessage(normalizedPhone, { text: message });
-    
-    return {
-      success: true,
-      messageId: result?.key?.id,
-    };
-  } catch (error) {
-    console.error('Erro ao enviar mensagem:', error);
-    throw new Error(`Falha ao enviar mensagem: ${error.message}`);
-  }
-};
-
-/**
- * Verifica se o socket está conectado
- * @returns {boolean}
- */
-const isConnected = () => {
-  return globalSock !== null && globalSock.ws?.readyState === 1;
-};
-
-/**
- * Obtém a instância do socket (para uso interno)
- * @returns {object|null}
- */
-const getSocket = () => {
-  return globalSock;
-};
-
-module.exports = {
-  sendMessage,
-  isConnected,
-  getSocket,
-};
