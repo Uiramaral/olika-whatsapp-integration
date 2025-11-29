@@ -319,10 +319,57 @@ function formatOrderMessage(event, order, customer) {
     return messages[event] || `📦 Atualização do pedido *#${orderNumber}*\n\nStatus: ${event}`;
 }
 
+// Declarar server no escopo global para uso no graceful shutdown
+let server = null;
+
+// --- Bloco de Graceful Shutdown ---
+const gracefulShutdown = async (signal) => {
+    logger.info(`\n\n🛑 Sinal ${signal} recebido. Iniciando Graceful Shutdown...`);
+    
+    // 1. Tenta desconectar o WhatsApp de forma limpa
+    if (global.sock) {
+        logger.info('🔗 Encerrando conexão Baileys (logout)...');
+        try {
+            await global.sock.logout(); // Tenta o logout limpo
+            logger.info('✅ Baileys desconectado e credenciais salvas.');
+        } catch (error) {
+            // Se falhar, tenta encerrar o socket de qualquer forma
+            logger.error('⚠️ Falha no logout Baileys, tentando encerrar o socket:', error.message);
+            try {
+                await global.sock.end();
+            } catch (e) {
+                logger.error('⚠️ Erro ao encerrar socket:', e.message);
+            }
+        }
+    }
+    
+    // 2. Fecha o servidor HTTP para novas conexões
+    if (server) {
+        server.close(() => {
+            logger.info('✅ Servidor HTTP encerrado.');
+            process.exit(0); // Encerra o processo limpo
+        });
+        
+        // 3. Timeout para forçar o encerramento se o Baileys travar
+        setTimeout(() => {
+            logger.error('❌ Shutdown timeout. Forçando encerramento.');
+            process.exit(1);
+        }, 10000); // 10 segundos para o Railway
+    } else {
+        // Se o servidor não estiver rodando, encerra imediatamente
+        process.exit(0);
+    }
+};
+
+// Capturar os sinais de encerramento do sistema (Railway envia SIGTERM)
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 // 🚀 CRÍTICO: Iniciar servidor HTTP IMEDIATAMENTE (independente do Baileys)
 // IMPORTANTE: Escutar em 0.0.0.0 para permitir acesso externo do Railway
 // Sem isso, o Railway não consegue acessar o container (erro "Application failed to respond")
-app.listen(PORT, '0.0.0.0', () => {
+// O app.listen retorna o objeto Server - precisamos capturá-lo para graceful shutdown
+server = app.listen(PORT, '0.0.0.0', () => {
     logger.info(`✅ Servidor HTTP rodando na porta ${PORT} (host: 0.0.0.0)`);
     logger.info(`📡 Endpoints disponíveis:`);
     logger.info(`   - GET  / (health check)`);
@@ -338,15 +385,4 @@ app.listen(PORT, '0.0.0.0', () => {
             // Não encerra o servidor - o Express continua funcionando
         });
     });
-});
-
-// Garantir que o processo não encerre por falta de atividade
-process.on('SIGTERM', () => {
-    logger.info('SIGTERM recebido, encerrando graciosamente...');
-    process.exit(0);
-});
-
-process.on('SIGINT', () => {
-    logger.info('SIGINT recebido, encerrando graciosamente...');
-    process.exit(0);
 });
