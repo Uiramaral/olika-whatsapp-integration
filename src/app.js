@@ -75,9 +75,12 @@ app.get('/api/whatsapp/status', requireAuth, (req, res) => {
         // ✅ Usar global.whatsappUser (salvo no connection.update) ou fallback para sock.user
         const userJid = global.whatsappUser || sock?.user?.id || null;
         
+        // ✅ Garantir que retorna global.currentPairingCode se definido
+        const finalPairingCode = pairingCode || global.currentPairingCode || null;
+        
         res.json({
             connected: connected,
-            pairingCode: pairingCode,
+            pairingCode: finalPairingCode,
             user: userJid ? {
                 id: userJid,
                 name: sock?.user?.name || null

@@ -89,6 +89,9 @@ const startSock = async (whatsappPhone = null) => {
   const { version } = await fetchLatestBaileysVersion();
   const logger = P({ level: "info" });
   
+  // 🧹 Limpar flag de conexão em andamento antes de iniciar nova tentativa
+  global.isConnecting = false;
+  
   // 🔒 Encerrar conexões anteriores ao iniciar nova
   if (global.sock) {
     logger.warn("⚠️ Encerrando conexão anterior antes de iniciar nova...");
@@ -277,6 +280,9 @@ const startSock = async (whatsappPhone = null) => {
   logger.info(`✅ Socket Baileys criado para número: ${WHATSAPP_PHONE}`);
 
   // 🧠 Eventos principais
+  // Capturar WHATSAPP_PHONE no escopo do evento para uso no setTimeout
+  const phoneForPairing = WHATSAPP_PHONE;
+  
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr, pairingCode, isNewLogin } = update;
     const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -303,15 +309,15 @@ const startSock = async (whatsappPhone = null) => {
     }
 
     // ✅ Capturar QR Code diretamente do evento (fallback)
-    if (qr) {
+    // ⚠️ IMPORTANTE: Só tentar gerar código se não estiver registrado ainda
+    if (qr && !sock.authState?.creds?.registered) {
       global.currentQR = qr;
       global.currentQRTimestamp = Date.now();
       logger.info(`📱 Novo QR Code gerado. Escaneie com o app WhatsApp.`);
       
       // Se não tiver pairingCode ainda, tentar gerar via requestPairingCode
+      // ⏳ ADIAR a chamada para garantir que o socket esteja totalmente inicializado
       if (!global.currentPairingCode) {
-        logger.info(`📱 Tentando gerar código de pareamento via requestPairingCode...`);
-        
         // ⏳ Otimização: Não gerar novo código se o último foi gerado há menos de 60 segundos
         const shouldGenerateNewCode = !global.currentQRTimestamp || (Date.now() - global.currentQRTimestamp > 60000);
         
@@ -321,55 +327,57 @@ const startSock = async (whatsappPhone = null) => {
         }
         
         try {
-          // Verificar se o método requestPairingCode está disponível
-          if (sock && typeof sock.requestPairingCode === "function") {
-            const phoneNumber = WHATSAPP_PHONE;
-            
-            logger.info(`📲 Tentando gerar código de pareamento para ${phoneNumber}...`);
-            
-            // ✅ Correção: requestPairingCode precisa do prefixo "+" no número
-            // Formato esperado: "+5571987019420" (com +, sem @s.whatsapp.net)
-            const formattedPhone = phoneNumber.startsWith('+')
-              ? phoneNumber
-              : `+${phoneNumber}`;
-            
-            logger.info(`📲 Número formatado para pareamento: ${formattedPhone}`);
-            const pairingCode = await sock.requestPairingCode(formattedPhone);
-            
-            if (pairingCode && pairingCode.length === 8) {
-              global.currentPairingCode = pairingCode;
-              global.currentQRTimestamp = Date.now();
-              
-              logger.info(`✅ Código de pareamento gerado via requestPairingCode: ${pairingCode}`);
-              logger.info("➡️ Use este código no WhatsApp Business para parear.");
-            } else {
-              throw new Error(`requestPairingCode retornou código inválido: ${pairingCode}`);
-            }
-          } else {
-            // Fallback: extrair código do QR se possível
-            logger.warn("⚠️ requestPairingCode() não está disponível nesta versão do Baileys.");
-            
-            // Tentar extrair código numérico do QR (alguns QR codes contêm o código)
-            let extractedCode = null;
+          // ⏳ Aguardar 1.5s para garantir que o socket finalize o handshake WebSocket
+          setTimeout(async () => {
             try {
-              const qrMatch = qr.match(/\d{8}/);
-              if (qrMatch && qrMatch[0]) {
-                extractedCode = qrMatch[0];
-                logger.info(`📲 Código extraído do QR: ${extractedCode}`);
+              // Verificar se o método requestPairingCode está disponível
+              if (sock && typeof sock.requestPairingCode === "function") {
+                // ✅ Usar número global ou do escopo capturado
+                const phoneNumber = global.currentWhatsAppPhone || phoneForPairing;
+                
+                logger.info(`📱 Tentando gerar código de pareamento via requestPairingCode...`);
+                logger.info(`📲 Número: ${phoneNumber}`);
+                
+                // ✅ Correção: requestPairingCode precisa do prefixo "+" no número
+                // Formato esperado: "+5571987019420" (com +, sem @s.whatsapp.net)
+                const formattedPhone = phoneNumber.startsWith('+')
+                  ? phoneNumber
+                  : `+${phoneNumber}`;
+                
+                logger.info(`📲 Número formatado para pareamento: ${formattedPhone}`);
+                const code = await sock.requestPairingCode(formattedPhone);
+                
+                if (code && code.length === 8) {
+                  global.currentPairingCode = code;
+                  global.currentQRTimestamp = Date.now();
+                  
+                  logger.info(`🔢 Código de pareamento gerado: ${code}`);
+                  logger.info("➡️ Use este código no WhatsApp Business para parear.");
+                } else {
+                  logger.warn(`⚠️ requestPairingCode retornou código inválido: ${code}`);
+                }
+              } else {
+                logger.warn("⚠️ requestPairingCode() não está disponível nesta versão do Baileys.");
+                
+                // Fallback: tentar extrair código do QR
+                try {
+                  const qrMatch = qr.match(/\d{8}/);
+                  if (qrMatch && qrMatch[0]) {
+                    global.currentPairingCode = qrMatch[0];
+                    global.currentQRTimestamp = Date.now();
+                    logger.info(`📲 Código extraído do QR: ${qrMatch[0]}`);
+                  }
+                } catch (e) {
+                  logger.warn("⚠️ Não foi possível extrair código do QR");
+                }
               }
-            } catch (e) {
-              logger.warn("⚠️ Não foi possível extrair código do QR");
+            } catch (err) {
+              logger.error("❌ Falha ao gerar código de pareamento:", err?.message || err);
+              logger.error("❌ Stack trace:", err?.stack);
             }
-            
-            if (extractedCode) {
-              global.currentPairingCode = extractedCode;
-              global.currentQRTimestamp = Date.now();
-              logger.info(`📲 Código de pareamento extraído do QR: ${extractedCode}`);
-            }
-          }
-        } catch (err) {
-          logger.error("❌ Erro ao gerar código de pareamento:", err.message);
-          logger.error("❌ Stack trace:", err.stack);
+          }, 1500); // aguarda 1.5s antes de tentar gerar o código
+        } catch (e) {
+          logger.error("❌ Erro ao solicitar código:", e?.message || e);
         }
       }
     }
