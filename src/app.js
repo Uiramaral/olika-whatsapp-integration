@@ -67,18 +67,20 @@ app.get('/', (req, res) => {
 app.get('/api/whatsapp/status', requireAuth, (req, res) => {
     try {
         const sock = global.sock;
-        const user = sock?.user;
         const connected = isConnected();
         
         // Retornar código de pareamento apenas se não estiver conectado
         const pairingCode = connected ? null : (global.currentPairingCode || null);
         
+        // ✅ Usar global.whatsappUser (salvo no connection.update) ou fallback para sock.user
+        const userJid = global.whatsappUser || sock?.user?.id || null;
+        
         res.json({
             connected: connected,
             pairingCode: pairingCode,
-            user: user ? {
-                id: user.id,
-                name: user.name || null
+            user: userJid ? {
+                id: userJid,
+                name: sock?.user?.name || null
             } : null,
             last_updated: new Date().toISOString()
         });
@@ -235,6 +237,56 @@ app.post('/api/whatsapp/disconnect', requireAuth, async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Erro ao desconectar WhatsApp'
+        });
+    }
+});
+
+// Endpoint para iniciar conexão WhatsApp manualmente
+app.post('/api/whatsapp/connect', requireAuth, async (req, res) => {
+    try {
+        logger.info('🔌 Solicitação de conexão WhatsApp recebida');
+        
+        // Verificar se já está conectado
+        if (isConnected()) {
+            logger.info('✅ WhatsApp já está conectado');
+            return res.json({
+                success: true,
+                message: 'WhatsApp já está conectado',
+                connected: true
+            });
+        }
+        
+        // Verificar se já está tentando conectar
+        if (global.sock && !isConnected()) {
+            logger.info('⏳ Conexão já em andamento...');
+            return res.json({
+                success: true,
+                message: 'Conexão já está em andamento. Aguarde...',
+                connecting: true
+            });
+        }
+        
+        // Buscar número do WhatsApp do banco de dados
+        logger.info('🔍 Buscando número do WhatsApp no banco de dados...');
+        const whatsappPhone = await getWhatsAppPhone();
+        logger.info(`✅ Número obtido: ${whatsappPhone}`);
+        
+        // Iniciar conexão em segundo plano (não bloquear resposta)
+        startSock(whatsappPhone).catch(err => {
+            logger.error(`❌ Erro ao iniciar WhatsApp:`, err.message);
+        });
+        
+        res.json({
+            success: true,
+            message: 'Conexão WhatsApp iniciada. Aguarde alguns segundos para o código de pareamento aparecer.',
+            phone: whatsappPhone,
+            connecting: true
+        });
+    } catch (error) {
+        logger.error('Erro ao iniciar conexão WhatsApp:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Erro ao iniciar conexão WhatsApp: ' + error.message
         });
     }
 });
@@ -544,29 +596,7 @@ server = app.listen(PORT, '0.0.0.0', () => {
     logger.info(`   - POST /send-message (envio simples)`);
     logger.info(`   - POST /api/notify (notificações Laravel)`);
     
-    // 🔌 Iniciar Baileys em segundo plano (não bloqueia o Express)
-    // Usar setImmediate para garantir que o servidor já está totalmente ativo
-    setImmediate(async () => {
-        logger.info(`🔄 Iniciando conexão WhatsApp em segundo plano...`);
-        try {
-            // Buscar número do WhatsApp do banco de dados
-            logger.info(`🔍 Buscando número do WhatsApp no banco de dados...`);
-            const whatsappPhone = await getWhatsAppPhone();
-            logger.info(`✅ Número obtido do banco de dados: ${whatsappPhone}`);
-            logger.info(`🚀 Iniciando conexão WhatsApp para número: ${whatsappPhone}`);
-            // Passar o número para startSock
-            startSock(whatsappPhone).catch(err => {
-                logger.error(`❌ Erro ao iniciar WhatsApp para número ${whatsappPhone}:`, err.message);
-            });
-        } catch (err) {
-            logger.error('❌ Erro ao buscar configurações do WhatsApp:', err.message);
-            const fallbackPhone = process.env.WHATSAPP_PHONE || "5571987019420";
-            logger.warn(`⚠️ Usando número padrão/fallback: ${fallbackPhone}`);
-            logger.info(`🚀 Iniciando conexão WhatsApp para número: ${fallbackPhone}`);
-            // Tentar iniciar com número padrão
-            startSock(fallbackPhone).catch(err => {
-                logger.error(`❌ Erro ao iniciar WhatsApp para número ${fallbackPhone}:`, err.message);
-            });
-        }
-    });
+    // 🔌 NÃO iniciar Baileys automaticamente - aguardar solicitação manual via /api/whatsapp/connect
+    // A conexão será iniciada apenas quando o usuário clicar no botão "Conectar WhatsApp" no dashboard
+    logger.info(`⏸️ Servidor pronto. Aguardando solicitação de conexão via /api/whatsapp/connect`);
 });

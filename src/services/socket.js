@@ -29,6 +29,9 @@ global.isWhatsAppConnected = false;
 // Número do WhatsApp atual (do banco de dados)
 global.currentWhatsAppPhone = null;
 
+// Usuário conectado (número pareado) - salvo quando conexão abre
+global.whatsappUser = null;
+
 const startSock = async (whatsappPhone = null) => {
   const { version } = await fetchLatestBaileysVersion();
   const logger = P({ level: "info" });
@@ -186,9 +189,21 @@ const startSock = async (whatsappPhone = null) => {
 
   // 🧠 Eventos principais
   sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    const { connection, lastDisconnect, qr, isNewLogin } = update;
+    const statusCode = lastDisconnect?.error?.output?.statusCode;
+
+    // 🔍 Depuração completa
+    logger.info("📡 connection.update =>", {
+      connection,
+      hasQR: !!qr,
+      isNewLogin,
+      statusCode,
+      hasLastDisconnect: !!lastDisconnect
+    });
 
     if (qr) {
+      logger.info(`📱 Novo código de pareamento disponível (QR recebido)`);
+      
       // Tentar gerar código de pareamento real usando requestPairingCode (Baileys 6.6+)
       // ⏳ Otimização: Não gerar novo código se o último foi gerado há menos de 60 segundos
       const shouldGenerateNewCode = !global.currentQRTimestamp || (Date.now() - global.currentQRTimestamp > 60000);
@@ -262,6 +277,10 @@ const startSock = async (whatsappPhone = null) => {
       }
     }
 
+    if (connection === "connecting") {
+      logger.info("🕓 Conectando ao WhatsApp...");
+    }
+
     if (connection === "open") {
       reconnectAttempts = 0;
       lastConnected = Date.now();
@@ -270,41 +289,48 @@ const startSock = async (whatsappPhone = null) => {
       global.isWhatsAppConnected = true;
       global.sock = sock;
       
+      // ✅ Salva o usuário logado (por ex: número pareado)
+      const userJid = sock.user?.id;
+      global.whatsappUser = userJid || null;
+      
       // Limpar QR Code quando conectado
       global.currentQR = null;
       global.currentQRTimestamp = null;
       global.currentPairingCode = null;
 
-        logger.info(`═══════════════════════════════════════════════════════════`);
-      logger.info(`✅ CONECTADO COM SUCESSO AO WHATSAPP!`);
-      logger.info(`📱 Número conectado: ${WHATSAPP_PHONE}`);
+      logger.info(`═══════════════════════════════════════════════════════════`);
+      logger.info(`🟢 Conexão com o WhatsApp aberta!`);
+      logger.info(`✅ WhatsApp conectado como ${userJid || 'desconhecido'}`);
+      logger.info(`📱 Número configurado: ${WHATSAPP_PHONE}`);
       logger.info(`═══════════════════════════════════════════════════════════`);
         
-        // Log do estado real
-        const hasUser = !!sock.user;
-        const wsState = sock?.ws?.readyState;
-        logger.info(`🔗 global.sock atualizado APÓS conexão. user: ${hasUser}, wsState: ${wsState}, isWhatsAppConnected: ${global.isWhatsAppConnected}`);
+      // Log do estado real
+      const hasUser = !!sock.user;
+      const wsState = sock?.ws?.readyState;
+      logger.info(`🔗 global.sock atualizado APÓS conexão. user: ${hasUser}, wsState: ${wsState}, isWhatsAppConnected: ${global.isWhatsAppConnected}`);
+      logger.info(`👤 Usuário salvo globalmente: ${global.whatsappUser}`);
         
-        // ✅ Verificar se as credenciais foram salvas
-        try {
-          const credsFile = path.join(SESSION_PATH, "creds.json");
-          const credsExists = await fs.access(credsFile).then(() => true).catch(() => false);
-          if (credsExists) {
-            logger.info(`✅ Credenciais salvas em: ${credsFile}`);
-          } else {
-            logger.warn(`⚠️ Arquivo de credenciais não encontrado em: ${credsFile}`);
-          }
-        } catch (err) {
-          logger.warn(`⚠️ Erro ao verificar credenciais: ${err.message}`);
+      // ✅ Verificar se as credenciais foram salvas
+      try {
+        const credsFile = path.join(SESSION_PATH, "creds.json");
+        const credsExists = await fs.access(credsFile).then(() => true).catch(() => false);
+        if (credsExists) {
+          logger.info(`✅ Credenciais salvas em: ${credsFile}`);
+        } else {
+          logger.warn(`⚠️ Arquivo de credenciais não encontrado em: ${credsFile}`);
         }
+      } catch (err) {
+        logger.warn(`⚠️ Erro ao verificar credenciais: ${err.message}`);
+      }
 
-        startHeartbeat();
+      startHeartbeat();
     }
 
     if (connection === "close") {
       // Atualizar estado de conexão imediatamente
       global.isWhatsAppConnected = false;
       global.sock = null;
+      global.whatsappUser = null; // Limpar usuário quando desconectado
       global.currentQR = null; // Limpar QR Code antigo
       global.currentQRTimestamp = null;
       global.currentPairingCode = null;
@@ -314,22 +340,30 @@ const startSock = async (whatsappPhone = null) => {
         ? ((Date.now() - lastConnected) / 60000).toFixed(1)
         : "0";
 
-      logger.warn(`🔴 WhatsApp desconectado após ${uptime} minutos online. Motivo: ${reason}`);
-      logger.warn("🔴 WhatsApp desconectado — aguardando reconexão...");
+      logger.warn(`🔴 Conexão encerrada. Motivo: ${reason || "desconhecido"}`);
+      logger.warn(`🔴 WhatsApp desconectado após ${uptime} minutos online.`);
 
-      if (reason === DisconnectReason.loggedOut) {
-        logger.error(
-          "🚫 Sessão encerrada. Será necessário novo QR Code. Limpando credenciais e tentando reconectar..."
-        );
+      // Tratamento específico para códigos de erro
+      if (reason === DisconnectReason.loggedOut || reason === 401) {
+        logger.error("🚫 Sessão encerrada ou inválida. Será necessário novo código de pareamento. Limpando credenciais e tentando reconectar...");
         // Limpar credenciais antigas antes de reconectar
-        // Isso força o Baileys a gerar um novo QR Code
+        // Isso força o Baileys a gerar um novo código de pareamento
         await clearAuthState();
         // Aguardar um pouco antes de reconectar para garantir que os arquivos foram deletados
         setTimeout(() => {
           reconnect();
         }, 1000);
+      } else if (reason === 515) {
+        logger.warn("⚠️ Código de erro 515 detectado. Tentando reconectar em 5s...");
+        setTimeout(() => {
+          reconnect();
+        }, 5000);
       } else {
-        reconnect();
+        // Tentativa automática de reconexão para outros erros
+        logger.info("🔄 Tentando reconectar em 5s...");
+        setTimeout(() => {
+          reconnect();
+        }, 5000);
       }
     }
   });
@@ -491,10 +525,10 @@ const disconnect = async () => {
     
     // Limpar referências
     global.sock = null;
+    global.whatsappUser = null; // Limpar usuário quando desconectado
     global.currentQR = null;
     global.currentQRTimestamp = null;
     global.currentPairingCode = null;
-    global.currentQRTimestamp = null;
     
     // Tentar logout do Baileys (encerra sessão)
     try {
