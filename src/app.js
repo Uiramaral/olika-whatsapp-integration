@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { sendMessage, isConnected } = require('./services/socket');
+const { startSock, sendMessage, isConnected } = require('./services/socket');
 const logger = require('./config/logger');
 
 const app = express();
@@ -244,10 +244,18 @@ function formatOrderMessage(event, order, customer) {
     return messages[event] || `📦 Atualização do pedido *#${orderNumber}*\n\nStatus: ${event}`;
 }
 
+// 🚀 Iniciar servidor HTTP PRIMEIRO (independente do Baileys)
 app.listen(PORT, () => {
-    logger.info(`✅ Servidor rodando na porta ${PORT}`);
+    logger.info(`✅ Servidor HTTP rodando na porta ${PORT}`);
     logger.info(`📡 Endpoints disponíveis:`);
     logger.info(`   - GET  / (health check)`);
     logger.info(`   - POST /send-message (envio simples)`);
     logger.info(`   - POST /api/notify (notificações Laravel)`);
+    
+    // 🔌 Iniciar Baileys em segundo plano (não bloqueia o Express)
+    logger.info(`🔄 Iniciando conexão WhatsApp em segundo plano...`);
+    startSock().catch(err => {
+        logger.error('❌ Erro ao iniciar WhatsApp (continuando sem WhatsApp):', err.message);
+        // Não encerra o servidor - o Express continua funcionando
+    });
 });

@@ -129,16 +129,6 @@ const startSock = async () => {
   return sock;
 };
 
-// 🟢 Inicialização segura
-(async () => {
-  try {
-    const sock = await startSock();
-    console.log("🚀 Olika WhatsApp socket iniciado com sucesso.");
-  } catch (err) {
-    console.error("❌ Falha ao iniciar o socket:", err);
-  }
-})();
-
 /**
  * Envia mensagem via WhatsApp
  * @param {string} phone - Número do telefone (formato: 5511999999999 ou 5511999999999@s.whatsapp.net)
@@ -221,6 +211,7 @@ const getSocket = () => {
 };
 
 module.exports = {
+  startSock,
   sendMessage,
   isConnected,
   getSocket,
