@@ -32,13 +32,25 @@ const requireAuth = (req, res, next) => {
     }
 };
 
-// Endpoint de health check (público)
+// Endpoint de health check (público) - SEMPRE responde, mesmo se Baileys não estiver pronto
 app.get('/', (req, res) => {
-    res.json({
-        status: 'running',
-        connected: isConnected(),
-        timestamp: new Date().toISOString()
-    });
+    try {
+        res.json({
+            status: 'running',
+            connected: isConnected(),
+            uptime: Math.floor(process.uptime()),
+            timestamp: new Date().toISOString(),
+            port: PORT
+        });
+    } catch (error) {
+        // Fallback caso algo dê errado
+        res.status(200).json({
+            status: 'running',
+            connected: false,
+            error: 'Erro ao verificar status',
+            timestamp: new Date().toISOString()
+        });
+    }
 });
 
 // Endpoint simples para envio direto (mantido para compatibilidade)
@@ -244,7 +256,8 @@ function formatOrderMessage(event, order, customer) {
     return messages[event] || `📦 Atualização do pedido *#${orderNumber}*\n\nStatus: ${event}`;
 }
 
-// 🚀 Iniciar servidor HTTP PRIMEIRO (independente do Baileys)
+// 🚀 CRÍTICO: Iniciar servidor HTTP IMEDIATAMENTE (independente do Baileys)
+// O app.listen() deve ser executado de forma síncrona, sem await
 app.listen(PORT, () => {
     logger.info(`✅ Servidor HTTP rodando na porta ${PORT}`);
     logger.info(`📡 Endpoints disponíveis:`);
@@ -253,9 +266,23 @@ app.listen(PORT, () => {
     logger.info(`   - POST /api/notify (notificações Laravel)`);
     
     // 🔌 Iniciar Baileys em segundo plano (não bloqueia o Express)
-    logger.info(`🔄 Iniciando conexão WhatsApp em segundo plano...`);
-    startSock().catch(err => {
-        logger.error('❌ Erro ao iniciar WhatsApp (continuando sem WhatsApp):', err.message);
-        // Não encerra o servidor - o Express continua funcionando
+    // Usar setImmediate para garantir que o servidor já está totalmente ativo
+    setImmediate(() => {
+        logger.info(`🔄 Iniciando conexão WhatsApp em segundo plano...`);
+        startSock().catch(err => {
+            logger.error('❌ Erro ao iniciar WhatsApp (continuando sem WhatsApp):', err.message);
+            // Não encerra o servidor - o Express continua funcionando
+        });
     });
+});
+
+// Garantir que o processo não encerre por falta de atividade
+process.on('SIGTERM', () => {
+    logger.info('SIGTERM recebido, encerrando graciosamente...');
+    process.exit(0);
+});
+
+process.on('SIGINT', () => {
+    logger.info('SIGINT recebido, encerrando graciosamente...');
+    process.exit(0);
 });
