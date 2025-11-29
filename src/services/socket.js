@@ -70,24 +70,35 @@ async function startSock(whatsappPhone = null) {
 
   logger.info(`📱 Iniciando WhatsApp para número ${phone}`);
 
+  // ⚙️ Configuração de variáveis de ambiente para modo Companion
+  process.env.WA_CONNECTION_TYPE = 'companion';
+  process.env.WA_ENDPOINT = 'g.whatsapp.net';
+
   sock = makeWASocket({
     version,
     logger,
     printQRInTerminal: false,
-    browser: ['OlikaDashboard', 'Chrome', '10.0'],
     auth: state,
     mobile: false,
-    syncFullHistory: true,
     markOnlineOnConnect: false,
-    connectTimeoutMs: 60_000,
+    connectTimeoutMs: 60000,
+    syncFullHistory: true,
     generateHighQualityLinkPreview: false,
+
+    // ⚙️ Força modo Companion (aparece como "Ubuntu" no celular)
+    browser: ['Ubuntu', 'Ubuntu', '20.04'],
+    waWebSocketUrl: 'wss://g.whatsapp.net/ws/chat',
+    waWebSocketOptions: {
+      family: 4,
+      rejectUnauthorized: false
+    },
     userAgent: {
-      platform: 'ANDROID',
+      platform: 'LINUX',
       releaseChannel: 'RELEASE',
-      osVersion: '13',
-      device: 'Pixel 8 Pro',
-      manufacturer: 'Google',
-      buildNumber: 'TP1A.240505.004',
+      osVersion: 'Ubuntu 20.04',
+      device: 'Ubuntu',
+      manufacturer: 'Canonical',
+      buildNumber: '2024.10.1',
       mcc: '724',
       mnc: '005',
       localeLanguageIso6391: 'pt',
