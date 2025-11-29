@@ -111,10 +111,15 @@ const startSock = async () => {
       reconnectAttempts = 0;
       lastConnected = Date.now();
       logger.info("✅ Conectado com sucesso ao WhatsApp!");
+
+      // Atualiza global.sock apenas agora (quando WS existe)
+      global.sock = sock;
+
+      // Log do estado real do WebSocket
+      const state = sock?.ws?.readyState;
+      logger.info(`🔗 global.sock atualizado APÓS conexão. readyState: ${state}, conectado: ${state === 1}`);
+
       startHeartbeat();
-      global.sock = sock; // Atualizar referência global
-      const wsState = global.sock?.ws?.readyState;
-      logger.info(`🔗 global.sock atualizado. readyState: ${wsState}, conectado: ${wsState === 1}`);
     }
 
     if (connection === "close") {
@@ -154,10 +159,12 @@ const startSock = async () => {
     logger.error("Promise rejeitada sem tratamento:", reason);
   });
 
-  // Atualizar referência global imediatamente
+  // Inicializar referência global (será atualizada quando conexão abrir)
+  // Não atualizar aqui porque sock.ws ainda não existe
   global.sock = sock;
 
   // Log de estado inicial do socket (verificando global.sock para confirmar compartilhamento)
+  // Nota: sock.ws pode não existir ainda neste momento
   if (global.sock?.ws?.readyState === 1) {
     logger.info("🟢 Socket está conectado no momento da inicialização.");
   } else {
