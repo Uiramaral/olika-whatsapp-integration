@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { startSock, sendMessage, isConnected, disconnect } = require('./services/socket');
+const { startSock, sendMessage, isConnected, restartWhatsAppConnection } = require('./services/socket');
 const logger = require('./config/logger');
 
 const app = express();
@@ -13,11 +13,12 @@ const PORT = process.env.PORT ?? 8080;
 const API_TOKEN = process.env.API_SECRET;
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || API_TOKEN; // Fallback para API_SECRET se WEBHOOK_TOKEN não estiver definido
 
-// Variável global para armazenar QR Code atual
+// Variáveis globais (já inicializadas no socket.js, mas garantindo aqui também)
 global.currentQR = null;
-global.currentQRTimestamp = null; // Timestamp de quando o QR Code foi gerado
-global.currentPairingCode = null; // Código numérico de pareamento
-global.currentWhatsAppPhone = null; // Número do WhatsApp atual (do banco de dados)
+global.currentQRTimestamp = null;
+global.currentPairingCode = null;
+global.currentWhatsAppPhone = null;
+global.isConnecting = false; // Flag para evitar múltiplas conexões simultâneas
 
 // Middleware de Segurança para endpoints protegidos
 const requireAuth = (req, res, next) => {
@@ -63,36 +64,25 @@ app.get('/', (req, res) => {
 // Endpoint para obter QR Code atual (protegido por autenticação)
 // Endpoint removido - não vamos mais usar QR Code, apenas código de pareamento via status
 
-// Endpoint para obter status da conexão WhatsApp
-app.get('/api/whatsapp/status', requireAuth, (req, res) => {
+// Status detalhado do WhatsApp
+app.get('/api/whatsapp/status', requireAuth, async (req, res) => {
     try {
-        const sock = global.sock;
         const connected = isConnected();
-        
-        // Retornar código de pareamento apenas se não estiver conectado
         const pairingCode = connected ? null : (global.currentPairingCode || null);
-        
-        // ✅ Usar global.whatsappUser (salvo no connection.update) ou fallback para sock.user
-        const userJid = global.whatsappUser || sock?.user?.id || null;
-        
-        // ✅ Garantir que retorna global.currentPairingCode se definido
-        const finalPairingCode = pairingCode || global.currentPairingCode || null;
-        
+        const user = global.whatsappUser || null;
+
         res.json({
-            connected: connected,
-            pairingCode: finalPairingCode,
-            user: userJid ? {
-                id: userJid,
-                name: sock?.user?.name || null
+            connected,
+            pairingCode,
+            user: user ? {
+                id: user.id || user,
+                name: user.name || null
             } : null,
             last_updated: new Date().toISOString()
         });
-    } catch (error) {
-        logger.error('Erro ao obter status:', error);
-        res.status(500).json({
-            connected: false,
-            error: 'Erro ao obter status'
-        });
+    } catch (err) {
+        logger.error('Erro ao obter status WhatsApp:', err);
+        res.status(500).json({ connected: false, error: 'Erro ao obter status' });
     }
 });
 
@@ -219,30 +209,8 @@ async function getWhatsAppPhone() {
 }
 
 // Endpoint para desconectar WhatsApp manualmente
-app.post('/api/whatsapp/disconnect', requireAuth, async (req, res) => {
-    try {
-        const result = await disconnect();
-        
-        if (result.success) {
-            logger.info('🔴 WhatsApp desconectado manualmente via API');
-            res.json({
-                success: true,
-                message: result.message
-            });
-        } else {
-            res.status(400).json({
-                success: false,
-                message: result.message
-            });
-        }
-    } catch (error) {
-        logger.error('Erro ao desconectar WhatsApp:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Erro ao desconectar WhatsApp'
-        });
-    }
-});
+// Endpoint de desconexão removido - use restartWhatsAppConnection() para reiniciar
+// app.post('/api/whatsapp/disconnect', ...) - não mais necessário
 
 // Endpoint para limpar credenciais corrompidas (útil para resolver problemas de sessão)
 app.post('/api/whatsapp/clear-auth', requireAuth, async (req, res) => {
@@ -300,53 +268,25 @@ app.post('/api/whatsapp/clear-auth', requireAuth, async (req, res) => {
     }
 });
 
-// Endpoint para iniciar conexão WhatsApp manualmente
+// Força nova conexão
 app.post('/api/whatsapp/connect', requireAuth, async (req, res) => {
     try {
         logger.info('🔌 Solicitação de conexão WhatsApp recebida');
-        
-        // Verificar se já está conectado
-        if (isConnected()) {
-            logger.info('✅ WhatsApp já está conectado');
-            return res.json({
-                success: true,
-                message: 'WhatsApp já está conectado',
-                connected: true
-            });
-        }
-        
-        // Verificar se já está tentando conectar
-        if (global.sock && !isConnected()) {
+
+        if (global.isConnecting) {
             logger.info('⏳ Conexão já em andamento...');
-            return res.json({
-                success: true,
-                message: 'Conexão já está em andamento. Aguarde...',
-                connecting: true
-            });
+            return res.json({ message: 'Conexão já em andamento.' });
         }
-        
-        // Buscar número do WhatsApp do banco de dados
-        logger.info('🔍 Buscando número do WhatsApp no banco de dados...');
-        const whatsappPhone = await getWhatsAppPhone();
-        logger.info(`✅ Número obtido: ${whatsappPhone}`);
-        
-        // Iniciar conexão em segundo plano (não bloquear resposta)
-        startSock(whatsappPhone).catch(err => {
-            logger.error(`❌ Erro ao iniciar WhatsApp:`, err.message);
-        });
-        
-        res.json({
-            success: true,
-            message: 'Conexão WhatsApp iniciada. Aguarde alguns segundos para o código de pareamento aparecer.',
-            phone: whatsappPhone,
-            connecting: true
-        });
-    } catch (error) {
-        logger.error('Erro ao iniciar conexão WhatsApp:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Erro ao iniciar conexão WhatsApp: ' + error.message
-        });
+
+        global.isConnecting = true;
+        await restartWhatsAppConnection();
+        global.isConnecting = false;
+
+        res.json({ message: 'Reconexão iniciada com sucesso.' });
+    } catch (err) {
+        global.isConnecting = false;
+        logger.error('❌ Erro ao conectar ao WhatsApp:', err);
+        res.status(500).json({ error: 'Falha ao conectar ao WhatsApp.' });
     }
 });
 
@@ -365,7 +305,15 @@ app.post('/api/whatsapp/restart', requireAuth, async (req, res) => {
         // Desconectar conexão atual
         if (global.sock) {
             try {
-                await disconnect();
+                // Desconexão agora é feita via restartWhatsAppConnection()
+                if (global.sock) {
+                    try {
+                        await global.sock.logout?.();
+                        await global.sock.end?.();
+                    } catch (e) {
+                        // Ignorar erros
+                    }
+                }
                 logger.info('✅ Conexão anterior desconectada');
             } catch (err) {
                 logger.warn('⚠️ Erro ao desconectar conexão anterior:', err.message);
@@ -392,6 +340,22 @@ app.post('/api/whatsapp/restart', requireAuth, async (req, res) => {
             success: false,
             error: 'Erro ao reiniciar conexão WhatsApp'
         });
+    }
+});
+
+// Enviar mensagem manualmente
+app.post('/api/whatsapp/send', requireAuth, async (req, res) => {
+    try {
+        const { number, message } = req.body;
+        if (!number || !message) {
+            return res.status(400).json({ error: 'Número e mensagem são obrigatórios.' });
+        }
+
+        const result = await sendMessage(number, message);
+        res.json({ success: true, number, message, messageId: result.messageId });
+    } catch (err) {
+        logger.error('Erro ao enviar mensagem:', err);
+        res.status(500).json({ error: err.message });
     }
 });
 
@@ -649,13 +613,12 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 // Sem isso, o Railway não consegue acessar o container (erro "Application failed to respond")
 // O app.listen retorna o objeto Server - precisamos capturá-lo para graceful shutdown
 server = app.listen(PORT, '0.0.0.0', () => {
-    logger.info(`✅ Servidor HTTP rodando na porta ${PORT} (host: 0.0.0.0)`);
-    logger.info(`📡 Endpoints disponíveis:`);
-    logger.info(`   - GET  / (health check)`);
-    logger.info(`   - POST /send-message (envio simples)`);
-    logger.info(`   - POST /api/notify (notificações Laravel)`);
-    
-    // 🔌 NÃO iniciar Baileys automaticamente - aguardar solicitação manual via /api/whatsapp/connect
-    // A conexão será iniciada apenas quando o usuário clicar no botão "Conectar WhatsApp" no dashboard
-    logger.info(`⏸️ Servidor pronto. Aguardando solicitação de conexão via /api/whatsapp/connect`);
+    logger.info(`✅ Servidor HTTP rodando na porta ${PORT}`);
+    logger.info('📡 Endpoints disponíveis:');
+    logger.info('   - GET  / (health check)');
+    logger.info('   - GET  /api/whatsapp/status');
+    logger.info('   - POST /api/whatsapp/connect');
+    logger.info('   - POST /api/whatsapp/send');
+    logger.info('   - POST /api/notify (notificações Laravel)');
+    logger.info('⏸️ Servidor pronto. Aguardando solicitação de conexão via /api/whatsapp/connect');
 });
