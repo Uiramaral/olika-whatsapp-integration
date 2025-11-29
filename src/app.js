@@ -129,14 +129,18 @@ async function getWhatsAppPhone() {
             });
             
             req.on('error', (error) => {
-                logger.warn('Erro ao buscar número do WhatsApp do Laravel:', error.message);
-                resolve(process.env.WHATSAPP_PHONE || "5571987019420");
+                logger.warn(`⚠️ Erro ao buscar número do WhatsApp do Laravel: ${error.message}`);
+                const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
+                logger.info(`📱 Usando número fallback: ${fallback}`);
+                resolve(fallback);
             });
             
             req.setTimeout(5000, () => {
                 req.destroy();
-                logger.warn('Timeout ao buscar número do WhatsApp do Laravel');
-                resolve(process.env.WHATSAPP_PHONE || "5571987019420");
+                logger.warn('⏱️ Timeout ao buscar número do WhatsApp do Laravel (5s)');
+                const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
+                logger.info(`📱 Usando número fallback: ${fallback}`);
+                resolve(fallback);
             });
             
             req.end();
@@ -169,6 +173,48 @@ app.post('/api/whatsapp/disconnect', requireAuth, async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Erro ao desconectar WhatsApp'
+        });
+    }
+});
+
+// Endpoint para reiniciar conexão com novo número (quando número mudar no dashboard)
+app.post('/api/whatsapp/restart', requireAuth, async (req, res) => {
+    try {
+        logger.info('🔄 Reiniciando conexão WhatsApp com novo número...');
+        
+        // Buscar novo número do banco
+        const newPhone = await getWhatsAppPhone();
+        logger.info(`📱 Novo número obtido: ${newPhone}`);
+        
+        // Desconectar conexão atual
+        if (global.sock) {
+            try {
+                await disconnect();
+                logger.info('✅ Conexão anterior desconectada');
+            } catch (err) {
+                logger.warn('⚠️ Erro ao desconectar conexão anterior:', err.message);
+            }
+        }
+        
+        // Aguardar um pouco antes de reconectar
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // Reconectar com novo número
+        logger.info(`🚀 Reconectando com novo número: ${newPhone}`);
+        startSock(newPhone).catch(err => {
+            logger.error(`❌ Erro ao reconectar com novo número ${newPhone}:`, err.message);
+        });
+        
+        res.json({
+            success: true,
+            message: `Conexão reiniciada com número: ${newPhone}`,
+            new_phone: newPhone
+        });
+    } catch (error) {
+        logger.error('Erro ao reiniciar conexão WhatsApp:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Erro ao reiniciar conexão WhatsApp'
         });
     }
 });
@@ -435,11 +481,27 @@ server = app.listen(PORT, '0.0.0.0', () => {
     
     // 🔌 Iniciar Baileys em segundo plano (não bloqueia o Express)
     // Usar setImmediate para garantir que o servidor já está totalmente ativo
-    setImmediate(() => {
+    setImmediate(async () => {
         logger.info(`🔄 Iniciando conexão WhatsApp em segundo plano...`);
-        startSock().catch(err => {
-            logger.error('❌ Erro ao iniciar WhatsApp (continuando sem WhatsApp):', err.message);
-            // Não encerra o servidor - o Express continua funcionando
-        });
+        try {
+            // Buscar número do WhatsApp do banco de dados
+            logger.info(`🔍 Buscando número do WhatsApp no banco de dados...`);
+            const whatsappPhone = await getWhatsAppPhone();
+            logger.info(`✅ Número obtido do banco de dados: ${whatsappPhone}`);
+            logger.info(`🚀 Iniciando conexão WhatsApp para número: ${whatsappPhone}`);
+            // Passar o número para startSock
+            startSock(whatsappPhone).catch(err => {
+                logger.error(`❌ Erro ao iniciar WhatsApp para número ${whatsappPhone}:`, err.message);
+            });
+        } catch (err) {
+            logger.error('❌ Erro ao buscar configurações do WhatsApp:', err.message);
+            const fallbackPhone = process.env.WHATSAPP_PHONE || "5571987019420";
+            logger.warn(`⚠️ Usando número padrão/fallback: ${fallbackPhone}`);
+            logger.info(`🚀 Iniciando conexão WhatsApp para número: ${fallbackPhone}`);
+            // Tentar iniciar com número padrão
+            startSock(fallbackPhone).catch(err => {
+                logger.error(`❌ Erro ao iniciar WhatsApp para número ${fallbackPhone}:`, err.message);
+            });
+        }
     });
 });

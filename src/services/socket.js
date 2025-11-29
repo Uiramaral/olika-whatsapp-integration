@@ -34,7 +34,11 @@ const startSock = async (whatsappPhone = null) => {
   const WHATSAPP_PHONE = whatsappPhone || process.env.WHATSAPP_PHONE || "5571987019420";
   const SESSION_PATH = path.resolve(SESSION_BASE_DIR, WHATSAPP_PHONE);
   
-  logger.info(`📱 Usando número do WhatsApp: ${WHATSAPP_PHONE}`);
+  logger.info(`═══════════════════════════════════════════════════════════`);
+  logger.info(`📱 INICIANDO CONEXÃO WHATSAPP`);
+  logger.info(`📱 Número configurado: ${WHATSAPP_PHONE}`);
+  logger.info(`📱 Fonte: ${whatsappPhone ? 'Dashboard (banco de dados)' : process.env.WHATSAPP_PHONE ? 'Variável de ambiente' : 'Padrão'}`);
+  logger.info(`═══════════════════════════════════════════════════════════`);
   
   // 💾 Verificação e criação do diretório de sessão
   try {
@@ -135,9 +139,12 @@ const startSock = async (whatsappPhone = null) => {
       await new Promise((r) => setTimeout(r, delay));
 
       // Criar nova instância (o estado será atualizado quando connection === "open")
-      const newSock = await startSock();
+      // Nota: na reconexão, vamos usar o número padrão (pode ser melhorado para buscar do banco)
+      const reconnectPhone = process.env.WHATSAPP_PHONE || "5571987019420";
+      logger.info(`🔄 Reconectando para número: ${reconnectPhone}`);
+      const newSock = await startSock(reconnectPhone);
       // 🔁 (C) Log de diagnóstico para reconexão no Railway
-      if (newSock) logger.info("🟢 Nova instância do socket iniciada com sucesso (reconexão).");
+      if (newSock) logger.info(`🟢 Nova instância do socket iniciada com sucesso (reconexão) para número: ${reconnectPhone}`);
       // Não atualizar global.sock aqui - será atualizado no evento "open"
       logger.info("🔄 Nova instância criada, aguardando conexão...");
     } catch (err) {
@@ -148,6 +155,9 @@ const startSock = async (whatsappPhone = null) => {
   };
 
   // 🚀 Inicializa socket
+  logger.info(`🔌 Criando socket Baileys para número: ${WHATSAPP_PHONE}`);
+  logger.info(`🔌 Versão Baileys: ${version.join('.')}`);
+  
   sock = makeWASocket({
     version,
     logger,
@@ -159,6 +169,8 @@ const startSock = async (whatsappPhone = null) => {
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
   });
+  
+  logger.info(`✅ Socket Baileys criado para número: ${WHATSAPP_PHONE}`);
 
   // 🧠 Eventos principais
   sock.ev.on("connection.update", async (update) => {
@@ -251,7 +263,10 @@ const startSock = async (whatsappPhone = null) => {
       global.currentQRTimestamp = null;
       global.currentPairingCode = null;
 
-        logger.info("✅ Conectado com sucesso ao WhatsApp!");
+        logger.info(`═══════════════════════════════════════════════════════════`);
+      logger.info(`✅ CONECTADO COM SUCESSO AO WHATSAPP!`);
+      logger.info(`📱 Número conectado: ${WHATSAPP_PHONE}`);
+      logger.info(`═══════════════════════════════════════════════════════════`);
         
         // Log do estado real
         const hasUser = !!sock.user;
