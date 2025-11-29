@@ -112,12 +112,14 @@ const startSock = async () => {
       lastConnected = Date.now();
       logger.info("✅ Conectado com sucesso ao WhatsApp!");
 
-      // Atualiza global.sock apenas agora (quando WS existe)
+      // Atualiza global.sock apenas agora (quando conexão está aberta)
       global.sock = sock;
 
-      // Log do estado real do WebSocket
-      const state = sock?.ws?.readyState;
-      logger.info(`🔗 global.sock atualizado APÓS conexão. readyState: ${state}, conectado: ${state === 1}`);
+      // Log do estado real (usando sock.user para Baileys 6.6+)
+      const hasUser = !!sock.user;
+      const wsState = sock?.ws?.readyState;
+      const connected = isConnected();
+      logger.info(`🔗 global.sock atualizado APÓS conexão. user: ${hasUser}, wsState: ${wsState}, conectado: ${connected}`);
 
       startHeartbeat();
     }
@@ -164,8 +166,8 @@ const startSock = async () => {
   global.sock = sock;
 
   // Log de estado inicial do socket (verificando global.sock para confirmar compartilhamento)
-  // Nota: sock.ws pode não existir ainda neste momento
-  if (global.sock?.ws?.readyState === 1) {
+  // Nota: sock.ws pode não existir ainda neste momento, mas sock.user pode estar disponível
+  if (global.sock?.user || global.sock?.ws?.readyState === 1) {
     logger.info("🟢 Socket está conectado no momento da inicialização.");
   } else {
     logger.warn("🕓 Socket inicializado mas aguardando conexão WebSocket.");
@@ -188,9 +190,9 @@ const sendMessage = async (phone, message) => {
     throw new Error('Socket não está conectado. Aguarde a conexão ser estabelecida.');
   }
   
-  // Verificar se o WebSocket está realmente conectado
-  if (sock.ws?.readyState !== 1) {
-    throw new Error('WebSocket não está conectado (readyState: ' + (sock.ws?.readyState || 'null') + ')');
+  // Verificar se está conectado usando a mesma lógica do isConnected()
+  if (!sock.user && (!sock.ws || sock.ws.readyState !== 1)) {
+    throw new Error('WhatsApp não está conectado. Aguarde a conexão ser estabelecida.');
   }
   
   if (!phone || !message) {
@@ -234,6 +236,7 @@ const sendMessage = async (phone, message) => {
 
 /**
  * Verifica se o socket está conectado
+ * Compatível com Baileys 6.6+ onde sock.ws pode estar undefined mesmo com conexão ativa
  * @returns {boolean}
  */
 const isConnected = () => {
@@ -242,12 +245,14 @@ const isConnected = () => {
     return false;
   }
   
-  // Verificar estado do WebSocket
-  const wsState = sock.ws?.readyState;
+  // Nova forma de validar conexão no Baileys 6.6+
+  // sock.user é populado assim que a conta está online
+  if (sock.user) return true; // usuário autenticado e ativo
   
-  // readyState: 0 = CONNECTING, 1 = OPEN, 2 = CLOSING, 3 = CLOSED
-  // Apenas retornar true se estiver OPEN (1)
-  return wsState === 1;
+  // Fallback: verificar WebSocket se disponível
+  if (sock.ws && sock.ws.readyState === 1) return true;
+  
+  return false;
 };
 
 /**
