@@ -290,55 +290,84 @@ app.post('/api/whatsapp/connect', requireAuth, async (req, res) => {
     }
 });
 
-// Endpoint para reiniciar conexão com novo número (quando número mudar no dashboard)
+// --- Novo Endpoint /api/whatsapp/restart (Limpeza + Reconexão Total) ---
 app.post('/api/whatsapp/restart', requireAuth, async (req, res) => {
+    const fs = require('fs').promises;
+    const path = require('path');
+    
     try {
-        logger.info('🔄 Reiniciando conexão WhatsApp com novo número...');
-        
-        // Buscar novo número do banco
-        const newPhone = await getWhatsAppPhone();
-        // Atualizar número global
-        global.currentWhatsAppPhone = newPhone;
-        logger.info(`📱 Novo número obtido: ${newPhone}`);
-        logger.info(`💾 Número atualizado globalmente: ${global.currentWhatsAppPhone}`);
-        
-        // Desconectar conexão atual
-        if (global.sock) {
-            try {
-                // Desconexão agora é feita via restartWhatsAppConnection()
-                if (global.sock) {
-                    try {
-                        await global.sock.logout?.();
-                        await global.sock.end?.();
-                    } catch (e) {
-                        // Ignorar erros
-                    }
-                }
-                logger.info('✅ Conexão anterior desconectada');
-            } catch (err) {
-                logger.warn('⚠️ Erro ao desconectar conexão anterior:', err.message);
-            }
+        logger.info('🔄 [RESTART V2] Solicitada limpeza + reinício completo da conexão WhatsApp...');
+
+        // --- 1️⃣ Buscar número atualizado ---
+        let newPhone = null;
+        try {
+            const axios = require('axios');
+            const response = await axios.get('https://devdashboard.menuolika.com.br/api/whatsapp/settings');
+            newPhone = response?.data?.whatsapp_phone || process.env.WHATSAPP_PHONE;
+            logger.info(`📱 Número obtido do backend Laravel: ${newPhone}`);
+        } catch (err) {
+            newPhone = process.env.WHATSAPP_PHONE;
+            logger.warn(`⚠️ Falha ao obter número via API Laravel, usando fallback: ${newPhone}`);
         }
-        
-        // Aguardar um pouco antes de reconectar
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        // Reconectar com novo número
-        logger.info(`🚀 Reconectando com novo número: ${newPhone}`);
-        startSock(newPhone).catch(err => {
-            logger.error(`❌ Erro ao reconectar com novo número ${newPhone}:`, err.message);
-        });
-        
+
+        if (!newPhone) {
+            return res.status(400).json({ error: 'Número WhatsApp não encontrado.' });
+        }
+
+        global.currentWhatsAppPhone = newPhone;
+        logger.info(`💾 Número WhatsApp atualizado globalmente: ${global.currentWhatsAppPhone}`);
+
+        // --- 2️⃣ Limpeza dos arquivos de sessão no disco ---
+        const SESSION_BASE_DIR = path.resolve(process.cwd(), 'auth_info_baileys');
+        const SESSION_PATH = path.resolve(SESSION_BASE_DIR, newPhone);
+
+        try {
+            const files = await fs.readdir(SESSION_PATH).catch(() => []);
+            let deletedCount = 0;
+            for (const file of files) {
+                const filePath = path.join(SESSION_PATH, file);
+                await fs.unlink(filePath).catch(() => {});
+                deletedCount++;
+            }
+            logger.info(`🗑️ ${deletedCount} arquivo(s) de sessão removido(s) para ${newPhone}.`);
+        } catch (error) {
+            logger.warn('⚠️ Erro ao limpar credenciais no disco:', error.message);
+        }
+
+        // --- 3️⃣ Limpeza das variáveis globais ---
+        global.sock = null;
+        global.isWhatsAppConnected = false;
+        global.whatsappUser = null;
+        global.currentQR = null;
+        global.currentQRTimestamp = null;
+        global.currentPairingCode = null;
+        logger.info('✅ Estado global de conexão resetado.');
+
+        // --- 4️⃣ Reconexão ---
+        try {
+            logger.info(`🚀 Iniciando reconexão limpa para o número: ${newPhone}`);
+            startSock(newPhone).catch(err => {
+                logger.error(`❌ Erro ao reconectar com ${newPhone}: ${err.message}`);
+            });
+        } catch (err) {
+            logger.error('Erro ao iniciar reconexão:', err.message);
+            return res.status(500).json({
+                success: false,
+                error: 'Falha ao reiniciar a conexão WhatsApp.'
+            });
+        }
+
+        // --- 5️⃣ Retorno da API ---
         res.json({
             success: true,
-            message: `Conexão reiniciada com número: ${newPhone}`,
+            message: `Sessão limpa e reiniciada para o número: ${newPhone}. Novo código de pareamento será gerado.`,
             new_phone: newPhone
         });
     } catch (error) {
-        logger.error('Erro ao reiniciar conexão WhatsApp:', error);
+        logger.error('Erro inesperado no endpoint /api/whatsapp/restart:', error);
         res.status(500).json({
             success: false,
-            error: 'Erro ao reiniciar conexão WhatsApp'
+            error: 'Erro interno ao reiniciar conexão WhatsApp.'
         });
     }
 });
