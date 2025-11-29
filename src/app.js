@@ -69,11 +69,8 @@ app.get('/api/whatsapp/status', requireAuth, (req, res) => {
         const user = sock?.user;
         const connected = isConnected();
         
-        // Se não estiver conectado, verificar se há código de pareamento disponível
-        let pairingCode = null;
-        if (!connected && global.currentPairingCode) {
-            pairingCode = global.currentPairingCode;
-        }
+        // Retornar código de pareamento apenas se não estiver conectado
+        const pairingCode = connected ? null : (global.currentPairingCode || null);
         
         res.json({
             connected: connected,

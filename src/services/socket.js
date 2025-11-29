@@ -3,6 +3,8 @@
  * Estável e otimizado para Railway / Baileys 6.6+
  */
 
+require('dotenv').config();
+
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -15,6 +17,10 @@ const fs = require("fs").promises;
 const path = require("path");
 
 const SESSION_PATH = "./auth_info_baileys/5571987019420";
+
+// Número do WhatsApp para gerar código de pareamento
+// Pode ser definido via variável de ambiente WHATSAPP_PHONE
+const WHATSAPP_PHONE = process.env.WHATSAPP_PHONE || "5571987019420";
 
 // Usar global.sock para compartilhar referência entre módulos
 global.sock = null;
@@ -127,21 +133,54 @@ const startSock = async () => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      // Armazenar QR Code globalmente para acesso via API
-      global.currentQR = qr;
-      global.currentQRTimestamp = Date.now(); // Registrar quando foi gerado
-      
-      // O Baileys não fornece código numérico diretamente
-      // O QR Code precisa ser escaneado ou convertido
-      // Por enquanto, vamos gerar um código baseado no timestamp para exibição
-      // NOTA: Este não é o código real do WhatsApp, apenas um identificador visual
-      const timestamp = Date.now();
-      const codeFromTimestamp = String(timestamp).slice(-8); // Últimos 8 dígitos do timestamp
-      global.currentPairingCode = codeFromTimestamp;
-      
-      logger.info("📲 Novo QR Code gerado. Use o QR Code para parear.");
-      logger.info(`📲 QR Code armazenado (tamanho: ${qr.length} caracteres)`);
-      logger.warn("⚠️ Baileys não fornece código numérico de 8 dígitos. Use o QR Code para parear.");
+      // Tentar gerar código de pareamento real usando requestPairingCode (Baileys 6.6+)
+      try {
+        // Verificar se o método requestPairingCode está disponível
+        if (sock && typeof sock.requestPairingCode === "function") {
+          const phoneNumber = WHATSAPP_PHONE;
+          const jid = `${phoneNumber}@s.whatsapp.net`;
+          
+          logger.info(`📲 Tentando gerar código de pareamento para ${phoneNumber}...`);
+          
+          // Chamar requestPairingCode de forma assíncrona
+          const pairingCode = await sock.requestPairingCode(jid);
+          
+          if (pairingCode) {
+            global.currentPairingCode = pairingCode;
+            global.currentQRTimestamp = Date.now();
+            global.currentQR = null; // não precisamos mais de QR
+            
+            logger.info(`✅ Código de pareamento gerado: ${pairingCode}`);
+            logger.info("➡️ Use este código no WhatsApp Business para parear.");
+          } else {
+            throw new Error("requestPairingCode retornou null ou undefined");
+          }
+        } else {
+          // Fallback: se requestPairingCode não estiver disponível
+          logger.warn("⚠️ requestPairingCode() não está disponível nesta versão do Baileys.");
+          logger.info("📲 Usando QR Code como alternativa.");
+          
+          global.currentQR = qr;
+          global.currentQRTimestamp = Date.now();
+          // Gerar código temporário baseado em timestamp como fallback
+          const timestamp = Date.now();
+          const codeFromTimestamp = String(timestamp).slice(-8);
+          global.currentPairingCode = codeFromTimestamp;
+          
+          logger.info(`📲 QR Code armazenado (tamanho: ${qr.length} caracteres)`);
+          logger.warn("⚠️ Código exibido é temporário. Use o QR Code para parear.");
+        }
+      } catch (err) {
+        logger.error("❌ Erro ao gerar código de pareamento:", err.message);
+        logger.error("❌ Stack trace:", err.stack);
+        // Fallback para QR Code em caso de erro
+        global.currentQR = qr;
+        global.currentQRTimestamp = Date.now();
+        const timestamp = Date.now();
+        const codeFromTimestamp = String(timestamp).slice(-8);
+        global.currentPairingCode = codeFromTimestamp;
+        logger.warn("⚠️ Usando fallback: código temporário baseado em timestamp");
+      }
     }
 
     if (connection === "open") {
