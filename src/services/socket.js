@@ -65,11 +65,14 @@ async function startSock(whatsappPhone = null) {
     version,
     logger,
     printQRInTerminal: false,
-    browser: ['OlikaDashboard', 'Chrome', '10.0'], // identifica o dispositivo
-    syncFullHistory: false,
+    browser: ['OlikaDashboard', 'Safari', '1.0'], // ⚙️ se identifica como Companion App
+    syncFullHistory: true, // ✅ Obrigatório para modo companion
     markOnlineOnConnect: false,
     generateHighQualityLinkPreview: false,
+    connectTimeoutMs: 60_000,
     auth: state,
+    // ⚠️ Este parâmetro é essencial para o pareamento moderno
+    mobile: false, // força modo companion
   });
 
   global.sock = sock;
@@ -128,13 +131,14 @@ async function startSock(whatsappPhone = null) {
   // Salvar credenciais no disco sempre que mudarem
   sock.ev.on('creds.update', saveCreds);
 
-  // Watchdog automático a cada 60s
-  setInterval(async () => {
-    if (!global.isWhatsAppConnected) {
-      logger.warn('⚠️ WhatsApp desconectado. Tentando reconectar...');
-      await restartWhatsAppConnection();
-    }
-  }, 60000);
+  // 🧹 Watchdog automático a cada 60s (comentado temporariamente para testes de pareamento)
+  // Descomente após o pareamento funcionar corretamente
+  // setInterval(async () => {
+  //   if (!global.isWhatsAppConnected) {
+  //     logger.warn('⚠️ WhatsApp desconectado. Tentando reconectar...');
+  //     await restartWhatsAppConnection();
+  //   }
+  // }, 60000);
 
   return sock;
 }
