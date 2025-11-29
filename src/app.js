@@ -17,6 +17,7 @@ const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || API_TOKEN; // Fallback para A
 global.currentQR = null;
 global.currentQRTimestamp = null; // Timestamp de quando o QR Code foi gerado
 global.currentPairingCode = null; // Código numérico de pareamento
+global.currentWhatsAppPhone = null; // Número do WhatsApp atual (do banco de dados)
 
 // Middleware de Segurança para endpoints protegidos
 const requireAuth = (req, res, next) => {
@@ -91,6 +92,7 @@ app.get('/api/whatsapp/status', requireAuth, (req, res) => {
 });
 
 // Função para buscar número do WhatsApp do banco de dados
+// IMPORTANTE: Prioriza sempre o banco de dados sobre variáveis de ambiente
 async function getWhatsAppPhone() {
     const laravelApiUrl = process.env.LARAVEL_API_URL || 'https://devdashboard.menuolika.com.br';
     const laravelApiKey = process.env.API_SECRET || API_TOKEN;
@@ -105,6 +107,10 @@ async function getWhatsAppPhone() {
         const client = apiUrl.protocol === 'https:' ? https : http;
         
         return new Promise((resolve, reject) => {
+            logger.info(`🔍 Fazendo requisição para: ${apiUrl.href}`);
+            logger.info(`🔑 Token usado: ${laravelApiKey ? '***' + laravelApiKey.slice(-4) : 'não fornecido'}`);
+            logger.info(`🌍 process.env.WHATSAPP_PHONE atual: ${process.env.WHATSAPP_PHONE || 'não definido'}`);
+            
             const req = client.request({
                 hostname: apiUrl.hostname,
                 port: apiUrl.port || (apiUrl.protocol === 'https:' ? 443 : 80),
@@ -115,15 +121,36 @@ async function getWhatsAppPhone() {
                     'Accept': 'application/json'
                 }
             }, (res) => {
+                logger.info(`📡 Status HTTP da resposta: ${res.statusCode}`);
                 let data = '';
                 res.on('data', (chunk) => { data += chunk; });
                 res.on('end', () => {
                     try {
+                        logger.info(`📥 Dados brutos recebidos: ${data}`);
                         const settings = JSON.parse(data);
-                        resolve(settings.whatsapp_phone || process.env.WHATSAPP_PHONE || "5571987019420");
+                        logger.info(`📥 Resposta do Laravel parseada: ${JSON.stringify(settings)}`);
+                        
+                        // ✅ PRIORIDADE: Banco de dados primeiro, depois .env, depois padrão
+                        if (settings.whatsapp_phone && settings.whatsapp_phone.trim() !== '') {
+                            logger.info(`✅ Número obtido do banco de dados: ${settings.whatsapp_phone}`);
+                            logger.info(`⚠️ IGNORANDO process.env.WHATSAPP_PHONE (${process.env.WHATSAPP_PHONE || 'não definido'}) - usando banco de dados`);
+                            resolve(settings.whatsapp_phone);
+                        } else {
+                            logger.warn('⚠️ Número não encontrado no banco de dados ou está vazio');
+                            logger.warn(`📋 Resposta completa: ${JSON.stringify(settings)}`);
+                            logger.warn(`📋 Tipo de whatsapp_phone: ${typeof settings.whatsapp_phone}`);
+                            logger.warn(`📋 Valor: ${settings.whatsapp_phone}`);
+                            // Se não tiver no banco, usar .env ou padrão
+                            const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
+                            logger.info(`📱 Usando número fallback: ${fallback} (fonte: ${process.env.WHATSAPP_PHONE ? '.env' : 'padrão'})`);
+                            resolve(fallback);
+                        }
                     } catch (e) {
                         logger.warn('Erro ao parsear resposta do Laravel:', e.message);
-                        resolve(process.env.WHATSAPP_PHONE || "5571987019420");
+                        logger.warn(`📋 Dados recebidos: ${data}`);
+                        const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
+                        logger.info(`📱 Usando número fallback (erro parse): ${fallback}`);
+                        resolve(fallback);
                     }
                 });
             });
@@ -131,7 +158,7 @@ async function getWhatsAppPhone() {
             req.on('error', (error) => {
                 logger.warn(`⚠️ Erro ao buscar número do WhatsApp do Laravel: ${error.message}`);
                 const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
-                logger.info(`📱 Usando número fallback: ${fallback}`);
+                logger.info(`📱 Usando número fallback (erro conexão): ${fallback}`);
                 resolve(fallback);
             });
             
@@ -139,7 +166,7 @@ async function getWhatsAppPhone() {
                 req.destroy();
                 logger.warn('⏱️ Timeout ao buscar número do WhatsApp do Laravel (5s)');
                 const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
-                logger.info(`📱 Usando número fallback: ${fallback}`);
+                logger.info(`📱 Usando número fallback (timeout): ${fallback}`);
                 resolve(fallback);
             });
             
@@ -147,7 +174,9 @@ async function getWhatsAppPhone() {
         });
     } catch (error) {
         logger.warn('Erro ao buscar número do WhatsApp, usando fallback:', error.message);
-        return process.env.WHATSAPP_PHONE || "5571987019420";
+        const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
+        logger.info(`📱 Usando número fallback (erro geral): ${fallback}`);
+        return fallback;
     }
 }
 
@@ -184,7 +213,10 @@ app.post('/api/whatsapp/restart', requireAuth, async (req, res) => {
         
         // Buscar novo número do banco
         const newPhone = await getWhatsAppPhone();
+        // Atualizar número global
+        global.currentWhatsAppPhone = newPhone;
         logger.info(`📱 Novo número obtido: ${newPhone}`);
+        logger.info(`💾 Número atualizado globalmente: ${global.currentWhatsAppPhone}`);
         
         // Desconectar conexão atual
         if (global.sock) {

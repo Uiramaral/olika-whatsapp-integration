@@ -26,18 +26,29 @@ global.sock = null;
 // Controle de estado de conexão (mais confiável que sock.user)
 global.isWhatsAppConnected = false;
 
+// Número do WhatsApp atual (do banco de dados)
+global.currentWhatsAppPhone = null;
+
 const startSock = async (whatsappPhone = null) => {
   const { version } = await fetchLatestBaileysVersion();
   const logger = P({ level: "info" });
   
   // Número do WhatsApp (recebido como parâmetro ou do ambiente)
-  const WHATSAPP_PHONE = whatsappPhone || process.env.WHATSAPP_PHONE || "5571987019420";
+  // ✅ PRIORIDADE: Parâmetro > Global > .env > Padrão
+  const WHATSAPP_PHONE = whatsappPhone || global.currentWhatsAppPhone || process.env.WHATSAPP_PHONE || "5571987019420";
   const SESSION_PATH = path.resolve(SESSION_BASE_DIR, WHATSAPP_PHONE);
+  
+  // Atualizar número global se foi passado como parâmetro
+  if (whatsappPhone) {
+    global.currentWhatsAppPhone = whatsappPhone;
+  }
   
   logger.info(`═══════════════════════════════════════════════════════════`);
   logger.info(`📱 INICIANDO CONEXÃO WHATSAPP`);
   logger.info(`📱 Número configurado: ${WHATSAPP_PHONE}`);
-  logger.info(`📱 Fonte: ${whatsappPhone ? 'Dashboard (banco de dados)' : process.env.WHATSAPP_PHONE ? 'Variável de ambiente' : 'Padrão'}`);
+  logger.info(`📱 Fonte: ${whatsappPhone ? 'Dashboard (banco de dados - parâmetro)' : global.currentWhatsAppPhone ? 'Banco de dados (global)' : process.env.WHATSAPP_PHONE ? 'Variável de ambiente (.env)' : 'Padrão'}`);
+  logger.info(`📱 process.env.WHATSAPP_PHONE: ${process.env.WHATSAPP_PHONE || 'não definido'}`);
+  logger.info(`📱 global.currentWhatsAppPhone: ${global.currentWhatsAppPhone || 'não definido'}`);
   logger.info(`═══════════════════════════════════════════════════════════`);
   
   // 💾 Verificação e criação do diretório de sessão
@@ -139,9 +150,10 @@ const startSock = async (whatsappPhone = null) => {
       await new Promise((r) => setTimeout(r, delay));
 
       // Criar nova instância (o estado será atualizado quando connection === "open")
-      // Nota: na reconexão, vamos usar o número padrão (pode ser melhorado para buscar do banco)
-      const reconnectPhone = process.env.WHATSAPP_PHONE || "5571987019420";
+      // ✅ Usar número do banco de dados (armazenado globalmente) em vez do .env
+      const reconnectPhone = global.currentWhatsAppPhone || process.env.WHATSAPP_PHONE || "5571987019420";
       logger.info(`🔄 Reconectando para número: ${reconnectPhone}`);
+      logger.info(`📱 Fonte do número na reconexão: ${global.currentWhatsAppPhone ? 'Banco de dados (global)' : process.env.WHATSAPP_PHONE ? 'Variável de ambiente' : 'Padrão'}`);
       const newSock = await startSock(reconnectPhone);
       // 🔁 (C) Log de diagnóstico para reconexão no Railway
       if (newSock) logger.info(`🟢 Nova instância do socket iniciada com sucesso (reconexão) para número: ${reconnectPhone}`);
