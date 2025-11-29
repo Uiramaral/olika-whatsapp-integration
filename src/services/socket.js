@@ -16,14 +16,9 @@ const { Boom } = require("@hapi/boom");
 const fs = require("fs").promises;
 const path = require("path");
 
-// Número do WhatsApp para gerar código de pareamento
-// Pode ser definido via variável de ambiente WHATSAPP_PHONE
-const WHATSAPP_PHONE = process.env.WHATSAPP_PHONE || "5571987019420";
-
 // ✅ CORREÇÃO: Usar caminho absoluto para garantir compatibilidade com Railway Volume
-// No Railway, o WORKDIR é /app, então o caminho será /app/auth_info_baileys/5571987019420
+// No Railway, o WORKDIR é /app, então o caminho será /app/auth_info_baileys/{numero}
 const SESSION_BASE_DIR = path.resolve(process.cwd(), "auth_info_baileys");
-const SESSION_PATH = path.resolve(SESSION_BASE_DIR, WHATSAPP_PHONE);
 
 // Usar global.sock para compartilhar referência entre módulos
 global.sock = null;
@@ -31,9 +26,15 @@ global.sock = null;
 // Controle de estado de conexão (mais confiável que sock.user)
 global.isWhatsAppConnected = false;
 
-const startSock = async () => {
+const startSock = async (whatsappPhone = null) => {
   const { version } = await fetchLatestBaileysVersion();
   const logger = P({ level: "info" });
+  
+  // Número do WhatsApp (recebido como parâmetro ou do ambiente)
+  const WHATSAPP_PHONE = whatsappPhone || process.env.WHATSAPP_PHONE || "5571987019420";
+  const SESSION_PATH = path.resolve(SESSION_BASE_DIR, WHATSAPP_PHONE);
+  
+  logger.info(`📱 Usando número do WhatsApp: ${WHATSAPP_PHONE}`);
   
   // 💾 Verificação e criação do diretório de sessão
   try {

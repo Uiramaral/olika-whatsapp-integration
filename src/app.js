@@ -90,6 +90,63 @@ app.get('/api/whatsapp/status', requireAuth, (req, res) => {
     }
 });
 
+// Função para buscar número do WhatsApp do banco de dados
+async function getWhatsAppPhone() {
+    const laravelApiUrl = process.env.LARAVEL_API_URL || 'https://devdashboard.menuolika.com.br';
+    const laravelApiKey = process.env.API_SECRET || API_TOKEN;
+    
+    try {
+        // Usar require('https') ou 'http' para fazer requisição (Node.js nativo)
+        const https = require('https');
+        const http = require('http');
+        const url = require('url');
+        
+        const apiUrl = new URL(`${laravelApiUrl}/dashboard/whatsapp/settings`);
+        const client = apiUrl.protocol === 'https:' ? https : http;
+        
+        return new Promise((resolve, reject) => {
+            const req = client.request({
+                hostname: apiUrl.hostname,
+                port: apiUrl.port || (apiUrl.protocol === 'https:' ? 443 : 80),
+                path: apiUrl.pathname,
+                method: 'GET',
+                headers: {
+                    'X-API-Token': laravelApiKey,
+                    'Accept': 'application/json'
+                }
+            }, (res) => {
+                let data = '';
+                res.on('data', (chunk) => { data += chunk; });
+                res.on('end', () => {
+                    try {
+                        const settings = JSON.parse(data);
+                        resolve(settings.whatsapp_phone || process.env.WHATSAPP_PHONE || "5571987019420");
+                    } catch (e) {
+                        logger.warn('Erro ao parsear resposta do Laravel:', e.message);
+                        resolve(process.env.WHATSAPP_PHONE || "5571987019420");
+                    }
+                });
+            });
+            
+            req.on('error', (error) => {
+                logger.warn('Erro ao buscar número do WhatsApp do Laravel:', error.message);
+                resolve(process.env.WHATSAPP_PHONE || "5571987019420");
+            });
+            
+            req.setTimeout(5000, () => {
+                req.destroy();
+                logger.warn('Timeout ao buscar número do WhatsApp do Laravel');
+                resolve(process.env.WHATSAPP_PHONE || "5571987019420");
+            });
+            
+            req.end();
+        });
+    } catch (error) {
+        logger.warn('Erro ao buscar número do WhatsApp, usando fallback:', error.message);
+        return process.env.WHATSAPP_PHONE || "5571987019420";
+    }
+}
+
 // Endpoint para desconectar WhatsApp manualmente
 app.post('/api/whatsapp/disconnect', requireAuth, async (req, res) => {
     try {
