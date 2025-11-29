@@ -8,7 +8,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+// Railway usa porta 8080 por padrão - usar ?? em vez de || para não tratar 0 como falsy
+const PORT = process.env.PORT ?? 8080;
 const API_TOKEN = process.env.API_SECRET;
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || API_TOKEN; // Fallback para API_SECRET se WEBHOOK_TOKEN não estiver definido
 
