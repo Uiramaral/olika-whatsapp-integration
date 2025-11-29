@@ -28,13 +28,14 @@ global.sock = null;
 // Controle de estado de conexão (mais confiável que sock.user)
 global.isWhatsAppConnected = false;
 
-// Log do caminho de sessão para verificar se o volume está montado
-console.log("📁 Usando caminho de sessão:", SESSION_PATH);
-
 const startSock = async () => {
   const { version } = await fetchLatestBaileysVersion();
-  const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
   const logger = P({ level: "info" });
+  
+  // 💾 (D) Verificação de volume Railway antes de usar useMultiFileAuthState
+  logger.info(`📂 Pasta de sessão ativa: ${SESSION_PATH}`);
+  
+  const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
 
   // 🗑️ Função para limpar credenciais antigas (necessário em caso de logout)
   const clearAuthState = async () => {
@@ -106,6 +107,8 @@ const startSock = async () => {
 
       // Criar nova instância (o estado será atualizado quando connection === "open")
       const newSock = await startSock();
+      // 🔁 (C) Log de diagnóstico para reconexão no Railway
+      if (newSock) logger.info("🟢 Nova instância do socket iniciada com sucesso (reconexão).");
       // Não atualizar global.sock aqui - será atualizado no evento "open"
       logger.info("🔄 Nova instância criada, aguardando conexão...");
     } catch (err) {
@@ -134,16 +137,23 @@ const startSock = async () => {
 
     if (qr) {
       // Tentar gerar código de pareamento real usando requestPairingCode (Baileys 6.6+)
+      // ⏳ Otimização: Não gerar novo código se o último foi gerado há menos de 60 segundos
+      const shouldGenerateNewCode = !global.currentQRTimestamp || (Date.now() - global.currentQRTimestamp > 60000);
+      
+      if (!shouldGenerateNewCode) {
+        logger.info(`⏳ Código ainda válido (gerado há ${Math.floor((Date.now() - global.currentQRTimestamp) / 1000)}s). Aguardando expiração...`);
+        return;
+      }
+      
       try {
         // Verificar se o método requestPairingCode está disponível
         if (sock && typeof sock.requestPairingCode === "function") {
           const phoneNumber = WHATSAPP_PHONE;
-          const jid = `${phoneNumber}@s.whatsapp.net`;
           
           logger.info(`📲 Tentando gerar código de pareamento para ${phoneNumber}...`);
           
-          // Chamar requestPairingCode de forma assíncrona
-          const pairingCode = await sock.requestPairingCode(jid);
+          // ✅ Correção: requestPairingCode espera apenas o número, sem @s.whatsapp.net
+          const pairingCode = await sock.requestPairingCode(phoneNumber);
           
           if (pairingCode && pairingCode.length === 8) {
             global.currentPairingCode = pairingCode;
