@@ -50,11 +50,20 @@ async function startSock(whatsappPhone = null) {
 
   await fs.mkdir(SESSION_PATH, { recursive: true });
 
+  // 🧹 Limpeza forçada de sessão antiga (essencial para pareamento limpo)
   const FORCE_CLEAR = process.env.FORCE_CLEAR_AUTH_STATE === 'true';
   if (FORCE_CLEAR) {
-    logger.warn('⚠️ Limpando sessão antiga...');
-    const files = await fs.readdir(SESSION_PATH).catch(() => []);
-    for (const file of files) await fs.unlink(path.join(SESSION_PATH, file)).catch(() => {});
+    logger.warn('⚠️ FORCE_CLEAR_AUTH_STATE ativado - Limpando sessão antiga completamente...');
+    try {
+      const files = await fs.readdir(SESSION_PATH).catch(() => []);
+      for (const file of files) {
+        const filePath = path.join(SESSION_PATH, file);
+        await fs.unlink(filePath).catch(() => {});
+      }
+      logger.info(`✅ ${files.length} arquivo(s) de sessão removido(s). Nova autenticação será necessária.`);
+    } catch (err) {
+      logger.error('❌ Erro ao limpar sessão:', err.message);
+    }
   }
 
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
@@ -65,26 +74,25 @@ async function startSock(whatsappPhone = null) {
     version,
     logger,
     printQRInTerminal: false,
-    browser: ['OlikaDashboard', 'Chrome', '10.0'], // nome visível no WhatsApp
+    browser: ['OlikaDashboard', 'Chrome', '10.0'],
+    auth: state,
+    mobile: false,
     syncFullHistory: true,
     markOnlineOnConnect: false,
-    generateHighQualityLinkPreview: false,
     connectTimeoutMs: 60_000,
-    mobile: false, // importante: companion mode
-    auth: state,
-    // ⚙️ novo parâmetro força comportamento Android Companion
+    generateHighQualityLinkPreview: false,
     userAgent: {
       platform: 'ANDROID',
       releaseChannel: 'RELEASE',
       osVersion: '13',
-      device: 'Pixel 7 Pro',
+      device: 'Pixel 8 Pro',
       manufacturer: 'Google',
-      buildNumber: 'TP1A.220624.021',
+      buildNumber: 'TP1A.240505.004',
       mcc: '724',
       mnc: '005',
       localeLanguageIso6391: 'pt',
-      localeCountryIso31661Alpha2: 'BR',
-    },
+      localeCountryIso31661Alpha2: 'BR'
+    }
   });
 
   global.sock = sock;
@@ -98,14 +106,15 @@ async function startSock(whatsappPhone = null) {
     if (qr && !global.currentPairingCode) {
       global.currentQR = qr;
       logger.info('📱 Novo QR Code gerado. Escaneie com o app WhatsApp.');
+
       setTimeout(async () => {
         try {
           if (sock?.requestPairingCode) {
             logger.info('📞 Solicitando código de pareamento...');
-            const phoneNumber = global.currentWhatsAppPhone || phoneForPairing;
-            const formattedPhone = phoneNumber.startsWith('+') ? phoneNumber : `+${phoneNumber}`;
-            logger.info(`📲 Número formatado para pareamento: ${formattedPhone}`);
-            const code = await sock.requestPairingCode(formattedPhone);
+            let phoneNumber = global.currentWhatsAppPhone || phoneForPairing;
+            if (!phoneNumber.startsWith('+')) phoneNumber = '+' + phoneNumber; // ✅ sempre adiciona o +
+            logger.info(`📲 Número formatado para pareamento: ${phoneNumber}`);
+            const code = await sock.requestPairingCode(phoneNumber);
             global.currentPairingCode = code;
             logger.info(`🔢 Código de pareamento: ${code}`);
           }
