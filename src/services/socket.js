@@ -11,6 +11,8 @@ const {
 } = require("@whiskeysockets/baileys");
 const P = require("pino");
 const { Boom } = require("@hapi/boom");
+const fs = require("fs").promises;
+const path = require("path");
 
 const SESSION_PATH = "./auth_info_baileys/5571987019420";
 
@@ -27,6 +29,23 @@ const startSock = async () => {
   const { version } = await fetchLatestBaileysVersion();
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
   const logger = P({ level: "info" });
+
+  // 🗑️ Função para limpar credenciais antigas (necessário em caso de logout)
+  const clearAuthState = async () => {
+    try {
+      const sessionDir = SESSION_PATH;
+      const files = await fs.readdir(sessionDir).catch(() => []);
+      
+      for (const file of files) {
+        const filePath = path.join(sessionDir, file);
+        await fs.unlink(filePath).catch(() => {});
+      }
+      
+      logger.info("🗑️ Credenciais antigas removidas. Novo QR Code será gerado.");
+    } catch (err) {
+      logger.warn("⚠️ Erro ao limpar credenciais (pode não existir):", err.message);
+    }
+  };
 
   let sock;
   let reconnectAttempts = 0;
@@ -139,6 +158,7 @@ const startSock = async () => {
       // Atualizar estado de conexão imediatamente
       global.isWhatsAppConnected = false;
       global.sock = null;
+      global.currentQR = null; // Limpar QR Code antigo
       
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       const uptime = lastConnected
@@ -150,8 +170,15 @@ const startSock = async () => {
 
       if (reason === DisconnectReason.loggedOut) {
         logger.error(
-          "🚫 Sessão encerrada. Será necessário novo QR Code."
+          "🚫 Sessão encerrada. Será necessário novo QR Code. Limpando credenciais e tentando reconectar..."
         );
+        // Limpar credenciais antigas antes de reconectar
+        // Isso força o Baileys a gerar um novo QR Code
+        await clearAuthState();
+        // Aguardar um pouco antes de reconectar para garantir que os arquivos foram deletados
+        setTimeout(() => {
+          reconnect();
+        }, 1000);
       } else {
         reconnect();
       }
