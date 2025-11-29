@@ -127,14 +127,45 @@ async function getWhatsAppPhone() {
                 res.on('end', () => {
                     try {
                         logger.info(`📥 Dados brutos recebidos: ${data}`);
+                        
+                        // ❌ Se houver erro de autenticação (403), não aceitar o número do fallback
+                        if (res.statusCode === 403) {
+                            logger.error(`❌ Erro de autenticação (403). Token inválido ou não fornecido.`);
+                            logger.error(`📋 Resposta: ${data}`);
+                            const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
+                            logger.warn(`⚠️ Usando número fallback devido a erro de autenticação: ${fallback}`);
+                            resolve(fallback);
+                            return;
+                        }
+                        
+                        // ❌ Se houver outro erro HTTP, não aceitar o número
+                        if (res.statusCode < 200 || res.statusCode >= 300) {
+                            logger.error(`❌ Erro HTTP ${res.statusCode} ao buscar número do WhatsApp`);
+                            logger.error(`📋 Resposta: ${data}`);
+                            const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
+                            logger.warn(`⚠️ Usando número fallback devido a erro HTTP: ${fallback}`);
+                            resolve(fallback);
+                            return;
+                        }
+                        
                         const settings = JSON.parse(data);
                         logger.info(`📥 Resposta do Laravel parseada: ${JSON.stringify(settings)}`);
                         
+                        // ❌ Se houver erro na resposta JSON, não aceitar o número
+                        if (settings.error) {
+                            logger.error(`❌ Erro na resposta do Laravel: ${settings.error}`);
+                            const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
+                            logger.warn(`⚠️ Usando número fallback devido a erro na resposta: ${fallback}`);
+                            resolve(fallback);
+                            return;
+                        }
+                        
                         // ✅ PRIORIDADE: Banco de dados primeiro, depois .env, depois padrão
-                        if (settings.whatsapp_phone && settings.whatsapp_phone.trim() !== '') {
-                            logger.info(`✅ Número obtido do banco de dados: ${settings.whatsapp_phone}`);
+                        if (settings.whatsapp_phone && String(settings.whatsapp_phone).trim() !== '') {
+                            const phoneNumber = String(settings.whatsapp_phone).trim();
+                            logger.info(`✅ Número obtido do banco de dados: ${phoneNumber}`);
                             logger.info(`⚠️ IGNORANDO process.env.WHATSAPP_PHONE (${process.env.WHATSAPP_PHONE || 'não definido'}) - usando banco de dados`);
-                            resolve(settings.whatsapp_phone);
+                            resolve(phoneNumber);
                         } else {
                             logger.warn('⚠️ Número não encontrado no banco de dados ou está vazio');
                             logger.warn(`📋 Resposta completa: ${JSON.stringify(settings)}`);
