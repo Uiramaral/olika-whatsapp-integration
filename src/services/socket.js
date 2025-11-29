@@ -34,11 +34,18 @@ const startSock = async () => {
         if (sock?.ws?.readyState === 1) {
           sock.ws.send("ping");
           logger.debug("💓 Heartbeat enviado para manter conexão viva");
+          
+          // Manter presença ativa (opcional, mas ajuda)
+          try {
+            sock.sendPresenceUpdate('available');
+          } catch (e) {
+            // Ignorar erros de presença
+          }
         }
       } catch (err) {
         logger.warn("Erro ao enviar heartbeat:", err.message);
       }
-    }, 20000);
+    }, 30000); // A cada 30 segundos (mais frequente para manter conexão)
   };
 
   // 🔁 Reconector com backoff
@@ -139,8 +146,14 @@ const startSock = async () => {
  * @returns {Promise<{success: boolean, messageId?: string, error?: string}>}
  */
 const sendMessage = async (phone, message) => {
+  // Verificar conexão antes de tentar enviar
   if (!globalSock) {
     throw new Error('Socket não está conectado. Aguarde a conexão ser estabelecida.');
+  }
+  
+  // Verificar se o WebSocket está realmente conectado
+  if (globalSock.ws?.readyState !== 1) {
+    throw new Error('WebSocket não está conectado (readyState: ' + (globalSock.ws?.readyState || 'null') + ')');
   }
   
   if (!phone || !message) {
@@ -158,7 +171,13 @@ const sendMessage = async (phone, message) => {
   }
   
   try {
-    const result = await globalSock.sendMessage(normalizedPhone, { text: message });
+    // Timeout interno de 5 segundos para o sendMessage
+    const sendPromise = globalSock.sendMessage(normalizedPhone, { text: message });
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Timeout interno: sendMessage demorou mais de 5s')), 5000);
+    });
+    
+    const result = await Promise.race([sendPromise, timeoutPromise]);
     
     return {
       success: true,
@@ -166,6 +185,12 @@ const sendMessage = async (phone, message) => {
     };
   } catch (error) {
     console.error('Erro ao enviar mensagem:', error);
+    
+    // Se for timeout, relançar com mensagem mais clara
+    if (error.message.includes('Timeout')) {
+      throw new Error('Timeout ao enviar mensagem. WhatsApp pode estar reconectando.');
+    }
+    
     throw new Error(`Falha ao enviar mensagem: ${error.message}`);
   }
 };
@@ -175,7 +200,16 @@ const sendMessage = async (phone, message) => {
  * @returns {boolean}
  */
 const isConnected = () => {
-  return globalSock !== null && globalSock.ws?.readyState === 1;
+  if (!globalSock) {
+    return false;
+  }
+  
+  // Verificar estado do WebSocket
+  const wsState = globalSock.ws?.readyState;
+  
+  // readyState: 0 = CONNECTING, 1 = OPEN, 2 = CLOSING, 3 = CLOSED
+  // Apenas retornar true se estiver OPEN (1)
+  return wsState === 1;
 };
 
 /**

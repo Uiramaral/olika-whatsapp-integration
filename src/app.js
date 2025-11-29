@@ -65,21 +65,48 @@ app.post('/send-message', requireAuth, async (req, res) => {
 /**
  * Endpoint profissional para notificações do Laravel
  * Processa payload completo e gera mensagem formatada
+ * 
+ * IMPORTANTE: Responde rapidamente mesmo durante reconexão do Baileys
+ * para evitar timeout do proxy Railway (502)
  */
 app.post('/api/notify', requireAuth, async (req, res) => {
+    // Timeout de segurança: resposta em no máximo 8 segundos
+    const responseTimeout = setTimeout(() => {
+        if (!res.headersSent) {
+            logger.warn('⚠️ Timeout no endpoint /api/notify - resposta tardia', {
+                order_id: req.body?.order?.id,
+                event: req.body?.event
+            });
+            return res.status(503).json({
+                success: false,
+                error: 'Timeout: WhatsApp está reconectando. Tente novamente em 5s.',
+                retry: true,
+                timeout: true
+            });
+        }
+    }, 8000);
+
     try {
         const { event, order, customer, phone, message } = req.body;
         
         // Validar campos obrigatórios
         if (!phone && !customer?.phone) {
+            clearTimeout(responseTimeout);
             return res.status(400).json({ error: 'Telefone do cliente é obrigatório (phone ou customer.phone)' });
         }
 
+        // Verificar conexão ANTES de processar (resposta imediata)
         if (!isConnected()) {
-            logger.warn('Tentativa de envio enquanto WhatsApp desconectado', { phone: phone || customer?.phone });
+            clearTimeout(responseTimeout);
+            logger.warn('⚠️ Tentativa de envio enquanto WhatsApp desconectado/reconectando', { 
+                phone: phone || customer?.phone,
+                order_id: order?.id 
+            });
             return res.status(503).json({ 
-                error: 'WhatsApp não está conectado. A mensagem será perdida.',
-                retry: true 
+                success: false,
+                error: 'WhatsApp está reconectando. Tente novamente em 5s.',
+                retry: true,
+                connected: false
             });
         }
 
@@ -107,8 +134,15 @@ app.post('/api/notify', requireAuth, async (req, res) => {
             finalMessage = `${eventLabel}\n\nPedido #${order?.number || order?.id || 'N/A'}`;
         }
 
-        // Enviar mensagem
-        const result = await sendMessage(targetPhone, finalMessage);
+        // Enviar mensagem com timeout interno (6 segundos)
+        const sendPromise = sendMessage(targetPhone, finalMessage);
+        const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('Timeout ao enviar mensagem (6s)')), 6000);
+        });
+
+        const result = await Promise.race([sendPromise, timeoutPromise]);
+        
+        clearTimeout(responseTimeout);
         
         logger.info('📩 Notificação enviada com sucesso', {
             event,
@@ -118,21 +152,40 @@ app.post('/api/notify', requireAuth, async (req, res) => {
             message_length: finalMessage.length
         });
 
-        res.json({
+        return res.json({
             success: true,
             messageId: result.messageId,
             sent_at: new Date().toISOString()
         });
 
     } catch (error) {
+        clearTimeout(responseTimeout);
+        
+        // Se já respondeu, não responder novamente
+        if (res.headersSent) {
+            logger.error('❌ Erro após resposta já enviada', { error: error.message });
+            return;
+        }
+        
         logger.error('❌ Erro ao processar notificação', {
             error: error.message,
-            body: req.body
+            order_id: req.body?.order?.id,
+            event: req.body?.event
         });
         
-        res.status(500).json({ 
-            error: error.message,
-            success: false
+        // Se for timeout, retornar 503 com retry
+        if (error.message.includes('Timeout') || error.message.includes('timeout')) {
+            return res.status(503).json({ 
+                success: false,
+                error: 'Timeout ao enviar mensagem. WhatsApp pode estar reconectando.',
+                retry: true,
+                timeout: true
+            });
+        }
+        
+        return res.status(500).json({ 
+            success: false,
+            error: error.message
         });
     }
 });
