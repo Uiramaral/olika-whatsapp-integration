@@ -241,6 +241,62 @@ app.post('/api/whatsapp/disconnect', requireAuth, async (req, res) => {
     }
 });
 
+// Endpoint para limpar credenciais corrompidas (útil para resolver problemas de sessão)
+app.post('/api/whatsapp/clear-auth', requireAuth, async (req, res) => {
+    try {
+        logger.info('🗑️ Solicitação de limpeza de credenciais recebida');
+        
+        const { startSock } = require('./services/socket');
+        const fs = require('fs').promises;
+        const path = require('path');
+        
+        // Buscar número do WhatsApp
+        const whatsappPhone = await getWhatsAppPhone();
+        const SESSION_BASE_DIR = path.resolve(process.cwd(), "auth_info_baileys");
+        const SESSION_PATH = path.resolve(SESSION_BASE_DIR, whatsappPhone);
+        
+        // Limpar todos os arquivos da sessão
+        try {
+            const files = await fs.readdir(SESSION_PATH).catch(() => []);
+            let deletedCount = 0;
+            
+            for (const file of files) {
+                const filePath = path.join(SESSION_PATH, file);
+                await fs.unlink(filePath).catch(() => {});
+                deletedCount++;
+            }
+            
+            // Limpar estado global
+            global.sock = null;
+            global.isWhatsAppConnected = false;
+            global.whatsappUser = null;
+            global.currentQR = null;
+            global.currentQRTimestamp = null;
+            global.currentPairingCode = null;
+            
+            logger.info(`✅ ${deletedCount} arquivo(s) de sessão removido(s)`);
+            
+            res.json({
+                success: true,
+                message: `Credenciais limpas com sucesso. ${deletedCount} arquivo(s) removido(s).`,
+                deleted_files: deletedCount
+            });
+        } catch (error) {
+            logger.error('Erro ao limpar credenciais:', error);
+            res.status(500).json({
+                success: false,
+                error: 'Erro ao limpar credenciais: ' + error.message
+            });
+        }
+    } catch (error) {
+        logger.error('Erro no endpoint de limpeza:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Erro interno: ' + error.message
+        });
+    }
+});
+
 // Endpoint para iniciar conexão WhatsApp manualmente
 app.post('/api/whatsapp/connect', requireAuth, async (req, res) => {
     try {

@@ -159,8 +159,6 @@ const startSock = async (whatsappPhone = null) => {
     throw err; // Falhar se não conseguir criar/acessar o diretório
   }
   
-  const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
-
   // 🗑️ Função para limpar credenciais antigas (necessário em caso de logout)
   const clearAuthState = async () => {
     try {
@@ -172,11 +170,25 @@ const startSock = async (whatsappPhone = null) => {
         await fs.unlink(filePath).catch(() => {});
       }
       
-      logger.info("🗑️ Credenciais antigas removidas. Novo QR Code será gerado.");
+      logger.info("🗑️ Credenciais antigas removidas. Novo código de pareamento será gerado.");
     } catch (err) {
       logger.warn("⚠️ Erro ao limpar credenciais (pode não existir):", err.message);
     }
   };
+
+  // ⚠️ LIMPEZA FORÇADA: Se FORCE_CLEAR_AUTH_STATE=true, limpa sessão corrompida antes de iniciar
+  // Use esta variável de ambiente APENAS quando precisar limpar uma sessão corrompida
+  // Após o pareamento funcionar, REMOVA a variável ou defina como false
+  const FORCE_CLEAR_AUTH = process.env.FORCE_CLEAR_AUTH_STATE === 'true' || process.env.FORCE_CLEAR_AUTH_STATE === '1';
+  
+  if (FORCE_CLEAR_AUTH) {
+    logger.warn("⚠️ FORCE_CLEAR_AUTH_STATE ativado - Limpando sessão corrompida...");
+    logger.warn("⚠️ ATENÇÃO: Esta é uma ação destrutiva. Remova a variável após o pareamento funcionar!");
+    await clearAuthState();
+    logger.info("✅ Sessão limpa. Nova autenticação será necessária.");
+  }
+  
+  const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
 
   let sock;
   let reconnectAttempts = 0;
