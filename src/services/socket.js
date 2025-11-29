@@ -304,82 +304,51 @@ const startSock = async (whatsappPhone = null) => {
       global.currentQRTimestamp = Date.now();
       global.currentQR = qr || null; // Manter QR também se disponível
       
-      logger.info(`🔢 Código de pareamento recebido do evento: ${pairingCode}`);
+      logger.info(`🔢 Código de pareamento (emitido automaticamente): ${pairingCode}`);
       logger.info("➡️ Use este código no WhatsApp Business para parear.");
     }
 
-    // ✅ Capturar QR Code diretamente do evento (fallback)
-    // ⚠️ IMPORTANTE: Só tentar gerar código se não estiver registrado ainda
-    if (qr && !sock.authState?.creds?.registered) {
+    // ✅ Capturar QR Code e gerar código de pareamento se necessário
+    if (qr && !global.currentPairingCode) {
       global.currentQR = qr;
       global.currentQRTimestamp = Date.now();
-      logger.info(`📱 Novo QR Code gerado. Escaneie com o app WhatsApp.`);
-      
-      // Se não tiver pairingCode ainda, tentar gerar via requestPairingCode
-      // ⏳ ADIAR a chamada para garantir que o socket esteja totalmente inicializado
-      if (!global.currentPairingCode) {
-        // ⏳ Otimização: Não gerar novo código se o último foi gerado há menos de 60 segundos
-        const shouldGenerateNewCode = !global.currentQRTimestamp || (Date.now() - global.currentQRTimestamp > 60000);
-        
-        if (!shouldGenerateNewCode) {
-          logger.info(`⏳ Código ainda válido (gerado há ${Math.floor((Date.now() - global.currentQRTimestamp) / 1000)}s). Aguardando expiração...`);
-          return;
-        }
-        
+      logger.info("📱 Novo QR Code gerado. Escaneie com o app WhatsApp.");
+
+      // 🔁 Esperar um pouco para o socket estabilizar (aumentado para 2.5s)
+      setTimeout(async () => {
         try {
-          // ⏳ Aguardar 1.5s para garantir que o socket finalize o handshake WebSocket
-          setTimeout(async () => {
-            try {
-              // Verificar se o método requestPairingCode está disponível
-              if (sock && typeof sock.requestPairingCode === "function") {
-                // ✅ Usar número global ou do escopo capturado
-                const phoneNumber = global.currentWhatsAppPhone || phoneForPairing;
-                
-                logger.info(`📱 Tentando gerar código de pareamento via requestPairingCode...`);
-                logger.info(`📲 Número: ${phoneNumber}`);
-                
-                // ✅ Correção: requestPairingCode precisa do prefixo "+" no número
-                // Formato esperado: "+5571987019420" (com +, sem @s.whatsapp.net)
-                const formattedPhone = phoneNumber.startsWith('+')
-                  ? phoneNumber
-                  : `+${phoneNumber}`;
-                
-                logger.info(`📲 Número formatado para pareamento: ${formattedPhone}`);
-                const code = await sock.requestPairingCode(formattedPhone);
-                
-                if (code && code.length === 8) {
-                  global.currentPairingCode = code;
-                  global.currentQRTimestamp = Date.now();
-                  
-                  logger.info(`🔢 Código de pareamento gerado: ${code}`);
-                  logger.info("➡️ Use este código no WhatsApp Business para parear.");
-                } else {
-                  logger.warn(`⚠️ requestPairingCode retornou código inválido: ${code}`);
-                }
-              } else {
-                logger.warn("⚠️ requestPairingCode() não está disponível nesta versão do Baileys.");
-                
-                // Fallback: tentar extrair código do QR
-                try {
-                  const qrMatch = qr.match(/\d{8}/);
-                  if (qrMatch && qrMatch[0]) {
-                    global.currentPairingCode = qrMatch[0];
-                    global.currentQRTimestamp = Date.now();
-                    logger.info(`📲 Código extraído do QR: ${qrMatch[0]}`);
-                  }
-                } catch (e) {
-                  logger.warn("⚠️ Não foi possível extrair código do QR");
-                }
-              }
-            } catch (err) {
-              logger.error("❌ Falha ao gerar código de pareamento:", err?.message || err);
-              logger.error("❌ Stack trace:", err?.stack);
+          if (sock && sock.requestPairingCode) {
+            logger.info("📱 Tentando gerar código de pareamento via requestPairingCode()...");
+            
+            // ✅ Usar número global (prioridade) ou do escopo capturado
+            const phoneNumber = global.currentWhatsAppPhone || phoneForPairing;
+            
+            // ✅ Correção: requestPairingCode precisa do prefixo "+" no número
+            // Formato esperado: "+5571987019420" (com +, sem @s.whatsapp.net)
+            const formattedPhone = phoneNumber.startsWith('+')
+              ? phoneNumber
+              : `+${phoneNumber}`;
+            
+            logger.info(`📲 Número para pareamento: ${formattedPhone}`);
+            const code = await sock.requestPairingCode(formattedPhone);
+            
+            if (code && code.length === 8) {
+              global.currentPairingCode = code;
+              global.currentQRTimestamp = Date.now();
+              
+              logger.info(`🔢 Código de pareamento gerado: ${code}`);
+              logger.info("➡️ Use este código no WhatsApp Business para parear.");
+            } else {
+              logger.warn(`⚠️ requestPairingCode retornou código inválido: ${code}`);
             }
-          }, 1500); // aguarda 1.5s antes de tentar gerar o código
-        } catch (e) {
-          logger.error("❌ Erro ao solicitar código:", e?.message || e);
+          } else {
+            logger.warn("⚠️ sock.requestPairingCode ainda não disponível.");
+          }
+        } catch (err) {
+          logger.error(`❌ Falha ao gerar código de pareamento: ${err?.message || err}`);
+          logger.error("❌ Stack trace:", err?.stack);
         }
-      }
+      }, 2500); // aguarda 2.5s antes de tentar gerar o código (aumentado para garantir handshake completo)
     }
 
     if (connection === "connecting") {
@@ -394,27 +363,14 @@ const startSock = async (whatsappPhone = null) => {
       global.isWhatsAppConnected = true;
       global.sock = sock;
       global.lastConnectedAt = Date.now(); // Atualizar timestamp para watchdog
+      global.whatsappUser = sock.user?.id || null;
       
-      // ✅ Salva o usuário logado (por ex: número pareado)
-      const userJid = sock.user?.id;
-      global.whatsappUser = userJid || null;
-      
-      // Limpar QR Code quando conectado
+      // Limpar QR Code e código de pareamento quando conectado
       global.currentQR = null;
       global.currentQRTimestamp = null;
       global.currentPairingCode = null;
 
-      logger.info(`═══════════════════════════════════════════════════════════`);
-      logger.info(`🟢 Conexão com o WhatsApp aberta!`);
-      logger.info(`✅ WhatsApp conectado como ${userJid || 'desconhecido'}`);
-      logger.info(`📱 Número configurado: ${WHATSAPP_PHONE}`);
-      logger.info(`═══════════════════════════════════════════════════════════`);
-        
-      // Log do estado real
-      const hasUser = !!sock.user;
-      const wsState = sock?.ws?.readyState;
-      logger.info(`🔗 global.sock atualizado APÓS conexão. user: ${hasUser}, wsState: ${wsState}, isWhatsAppConnected: ${global.isWhatsAppConnected}`);
-      logger.info(`👤 Usuário salvo globalmente: ${global.whatsappUser}`);
+      logger.info(`🟢 WhatsApp conectado com sucesso: ${sock.user?.id || 'desconhecido'}`);
         
       // ✅ Verificar se as credenciais foram salvas
       try {
@@ -422,32 +378,22 @@ const startSock = async (whatsappPhone = null) => {
         const credsExists = await fs.access(credsFile).then(() => true).catch(() => false);
         if (credsExists) {
           logger.info(`✅ Credenciais salvas em: ${credsFile}`);
-        } else {
-          logger.warn(`⚠️ Arquivo de credenciais não encontrado em: ${credsFile}`);
         }
       } catch (err) {
-        logger.warn(`⚠️ Erro ao verificar credenciais: ${err.message}`);
+        // Ignorar erro silenciosamente
       }
 
       startHeartbeat();
     }
 
     if (connection === "close") {
+      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      
+      logger.warn(`🔴 Conexão encerrada. Motivo: ${reason || "desconhecido"}`);
+      
       // Atualizar estado de conexão imediatamente
       global.isWhatsAppConnected = false;
-      global.sock = null;
-      global.whatsappUser = null; // Limpar usuário quando desconectado
-      // NÃO limpar currentPairingCode aqui - pode ser necessário para reconexão
-      // global.currentQR = null; // Manter QR/código para possível reconexão
-      
-      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      const uptime = lastConnected
-        ? ((Date.now() - lastConnected) / 60000).toFixed(1)
-        : "0";
-
-      logger.warn(`🔴 Conexão encerrada. Motivo: ${reason || "desconhecido"}`);
-      logger.warn(`🔴 WhatsApp desconectado após ${uptime} minutos online.`);
-      logger.info('🔴 WhatsApp desconectado. Tentando reconectar...');
+      global.whatsappUser = null;
 
       // Tratamento específico para códigos de erro
       if (reason === DisconnectReason.loggedOut || reason === 401) {
