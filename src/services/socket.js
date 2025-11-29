@@ -14,7 +14,14 @@ const { Boom } = require("@hapi/boom");
 
 const SESSION_PATH = "./auth_info_baileys/5571987019420";
 
+// Adicione esta constante para definir se usaremos Pairing Code
+const USE_PAIRING_CODE = true; 
+// Confirme se este é o número correto que receberá o código
+const PHONE_NUMBER = "5571987019420"; 
+
 let globalSock = null;
+// Variável global para armazenar o código de pareamento
+global.currentPairingCode = null;
 
 const startSock = async () => {
   const { version } = await fetchLatestBaileysVersion();
@@ -52,11 +59,11 @@ const startSock = async () => {
     startSock();
   };
 
-  // 🚀 Inicializa socket
+  // 🚀 Inicializa socket (MODIFICADO)
   sock = makeWASocket({
     version,
     logger,
-    printQRInTerminal: true,
+    printQRInTerminal: !USE_PAIRING_CODE, // Não imprime QR se for usar código
     auth: state,
     browser: ["Ubuntu", "Chrome", "20.0.04"],
     syncFullHistory: false,
@@ -64,6 +71,36 @@ const startSock = async () => {
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
   });
+
+  // 👇 LÓGICA DE PAREAMENTO ADICIONADA AQUI 👇
+  if (USE_PAIRING_CODE && !state.creds.registered) {
+    // Espera um pouco para garantir que o socket iniciou
+    setTimeout(async () => {
+      try {
+        // Formata o número (remove caracteres não numéricos e adiciona prefixo "+")
+        let codeNumber = PHONE_NUMBER.replace(/[^0-9]/g, "");
+        if (!codeNumber.startsWith('+')) {
+          codeNumber = '+' + codeNumber;
+        }
+        
+        logger.info(`📞 Solicitando código de pareamento para: ${codeNumber}`);
+        
+        // Solicita o código ao WhatsApp
+        const code = await sock.requestPairingCode(codeNumber);
+        
+        // Exibe no log de forma destacada
+        console.log("\n========================================================");
+        console.log(`📠 SEU CÓDIGO DE PAREAMENTO É:   ${code?.match(/.{1,4}/g)?.join("-")}`);
+        console.log("========================================================\n");
+        
+        // Disponibiliza para o app.js (se precisar puxar via API)
+        global.currentPairingCode = code;
+        
+      } catch (err) {
+        logger.error("Falha ao solicitar código de pareamento:", err);
+      }
+    }, 3000); // Delay de 3 segundos para estabilidade
+  }
 
   // 🧠 Eventos principais
   sock.ev.on("connection.update", async (update) => {
