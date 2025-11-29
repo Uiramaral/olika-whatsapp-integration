@@ -16,6 +16,9 @@ const SESSION_PATH = "./auth_info_baileys/5571987019420";
 
 let globalSock = null;
 
+// Log do caminho de sessão para verificar se o volume está montado
+console.log("📁 Usando caminho de sessão:", SESSION_PATH);
+
 const startSock = async () => {
   const { version } = await fetchLatestBaileysVersion();
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
@@ -48,15 +51,38 @@ const startSock = async () => {
     }, 30000); // A cada 30 segundos (mais frequente para manter conexão)
   };
 
-  // 🔁 Reconector com backoff
+  // 🔁 Reconector robusto - fecha socket antigo e atualiza globalSock
   const reconnect = async () => {
-    reconnectAttempts++;
-    const delay = Math.min(30000, 5000 * reconnectAttempts);
-    logger.warn(
-      `Conexão instável. Tentando reconectar em ${delay / 1000}s (tentativa ${reconnectAttempts})...`
-    );
-    await new Promise((r) => setTimeout(r, delay));
-    startSock();
+    try {
+      reconnectAttempts++;
+      const delay = Math.min(15000, 3000 * reconnectAttempts); // Delay reduzido para evitar restart do Railway
+      logger.warn(`🔄 Tentando reconectar ao WhatsApp em ${delay / 1000}s (tentativa ${reconnectAttempts})...`);
+
+      // Fechar socket antigo antes de criar novo
+      if (sock?.ws) {
+        try {
+          sock.ws.close();
+        } catch (e) {
+          // Ignorar erros ao fechar
+        }
+      }
+
+      // Limpar referência antiga
+      if (globalSock === sock) {
+        globalSock = null;
+      }
+
+      await new Promise((r) => setTimeout(r, delay));
+
+      // Criar nova instância e atualizar globalSock
+      const newSock = await startSock();
+      globalSock = newSock;
+      logger.info("✅ Reconectado com sucesso!");
+    } catch (err) {
+      logger.error("❌ Erro ao tentar reconectar:", err.message);
+      // Tentar novamente após 20 segundos
+      setTimeout(reconnect, 20000);
+    }
   };
 
   // 🚀 Inicializa socket
@@ -125,7 +151,16 @@ const startSock = async () => {
     logger.error("Promise rejeitada sem tratamento:", reason);
   });
 
+  // Atualizar referência global imediatamente
   globalSock = sock;
+
+  // Log de estado inicial do socket
+  if (sock?.ws?.readyState === 1) {
+    logger.info("🟢 Socket inicializado e conectado imediatamente.");
+  } else {
+    logger.warn("🕓 Socket inicializado mas ainda desconectado. Aguardando evento 'open'.");
+  }
+
   return sock;
 };
 
