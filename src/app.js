@@ -125,29 +125,31 @@ async function getWhatsAppPhone() {
                 let data = '';
                 res.on('data', (chunk) => { data += chunk; });
                 res.on('end', () => {
+                    // ❌ PRIMEIRO: Verificar status HTTP ANTES de parsear JSON
+                    if (res.statusCode === 403) {
+                        logger.error(`❌ Erro de autenticação (403). Token inválido ou não fornecido.`);
+                        logger.error(`📋 Resposta: ${data}`);
+                        logger.error(`🔑 Token enviado: ${laravelApiKey ? '***' + laravelApiKey.slice(-4) : 'não fornecido'}`);
+                        logger.error(`⚠️ Verifique se API_SECRET no Railway é igual ao API_SECRET/WEBHOOK_TOKEN no Laravel`);
+                        const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
+                        logger.warn(`⚠️ Usando número fallback devido a erro de autenticação: ${fallback}`);
+                        resolve(fallback);
+                        return;
+                    }
+                    
+                    // ❌ Se houver outro erro HTTP, não aceitar o número
+                    if (res.statusCode < 200 || res.statusCode >= 300) {
+                        logger.error(`❌ Erro HTTP ${res.statusCode} ao buscar número do WhatsApp`);
+                        logger.error(`📋 Resposta: ${data}`);
+                        const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
+                        logger.warn(`⚠️ Usando número fallback devido a erro HTTP: ${fallback}`);
+                        resolve(fallback);
+                        return;
+                    }
+                    
+                    // ✅ Só parsear JSON se o status for OK
                     try {
                         logger.info(`📥 Dados brutos recebidos: ${data}`);
-                        
-                        // ❌ Se houver erro de autenticação (403), não aceitar o número do fallback
-                        if (res.statusCode === 403) {
-                            logger.error(`❌ Erro de autenticação (403). Token inválido ou não fornecido.`);
-                            logger.error(`📋 Resposta: ${data}`);
-                            const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
-                            logger.warn(`⚠️ Usando número fallback devido a erro de autenticação: ${fallback}`);
-                            resolve(fallback);
-                            return;
-                        }
-                        
-                        // ❌ Se houver outro erro HTTP, não aceitar o número
-                        if (res.statusCode < 200 || res.statusCode >= 300) {
-                            logger.error(`❌ Erro HTTP ${res.statusCode} ao buscar número do WhatsApp`);
-                            logger.error(`📋 Resposta: ${data}`);
-                            const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
-                            logger.warn(`⚠️ Usando número fallback devido a erro HTTP: ${fallback}`);
-                            resolve(fallback);
-                            return;
-                        }
-                        
                         const settings = JSON.parse(data);
                         logger.info(`📥 Resposta do Laravel parseada: ${JSON.stringify(settings)}`);
                         
