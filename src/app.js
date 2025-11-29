@@ -1,9 +1,11 @@
 require('dotenv').config();
 const express = require('express');
+const cors = require('cors');
 const { sendMessage, isConnected } = require('./services/socket');
 const logger = require('./config/logger');
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
@@ -68,43 +70,49 @@ app.post('/send-message', requireAuth, async (req, res) => {
  * 
  * IMPORTANTE: Responde rapidamente mesmo durante reconexão do Baileys
  * para evitar timeout do proxy Railway (502)
+ * 
+ * Aceita dois formatos:
+ * 1. Simples: { phone, message }
+ * 2. Completo: { event, order, customer, phone?, message? }
  */
 app.post('/api/notify', requireAuth, async (req, res) => {
     // Timeout de segurança: resposta em no máximo 8 segundos
-    const responseTimeout = setTimeout(() => {
+    let responseTimeout = setTimeout(() => {
         if (!res.headersSent) {
             logger.warn('⚠️ Timeout no endpoint /api/notify - resposta tardia', {
                 order_id: req.body?.order?.id,
-                event: req.body?.event
+                event: req.body?.event,
+                phone: req.body?.phone || req.body?.customer?.phone
             });
-            return res.status(503).json({
+            res.status(504).json({
                 success: false,
-                error: 'Timeout: WhatsApp está reconectando. Tente novamente em 5s.',
+                error: 'Timeout interno: aplicação não respondeu a tempo',
                 retry: true,
                 timeout: true
             });
         }
     }, 8000);
 
+    // Função auxiliar para limpar timeout e garantir resposta única
+    const clearTimeoutAndRespond = (statusCode, jsonResponse) => {
+        clearTimeout(responseTimeout);
+        if (!res.headersSent) {
+            res.status(statusCode).json(jsonResponse);
+        }
+    };
+
     try {
         const { event, order, customer, phone, message } = req.body;
         
-        // Validar campos obrigatórios
-        if (!phone && !customer?.phone) {
-            clearTimeout(responseTimeout);
-            return res.status(400).json({ error: 'Telefone do cliente é obrigatório (phone ou customer.phone)' });
-        }
-
-        // Verificar conexão ANTES de processar (resposta imediata)
+        // Verificar conexão ANTES de qualquer processamento (resposta imediata)
         if (!isConnected()) {
-            clearTimeout(responseTimeout);
             logger.warn('⚠️ Tentativa de envio enquanto WhatsApp desconectado/reconectando', { 
                 phone: phone || customer?.phone,
                 order_id: order?.id 
             });
-            return res.status(503).json({ 
+            return clearTimeoutAndRespond(503, { 
                 success: false,
-                error: 'WhatsApp está reconectando. Tente novamente em 5s.',
+                error: 'WhatsApp não conectado. Tente novamente em alguns segundos.',
                 retry: true,
                 connected: false
             });
@@ -113,7 +121,15 @@ app.post('/api/notify', requireAuth, async (req, res) => {
         // Determinar telefone (prioridade: phone direto > customer.phone)
         const targetPhone = phone || customer?.phone;
         
-        // Se já tiver mensagem formatada, usar diretamente
+        // Validar telefone
+        if (!targetPhone) {
+            return clearTimeoutAndRespond(400, { 
+                success: false,
+                error: 'Telefone do cliente é obrigatório (phone ou customer.phone)' 
+            });
+        }
+
+        // Determinar mensagem final
         let finalMessage = message;
         
         // Se não tiver mensagem mas tiver dados do pedido, formatar
@@ -123,15 +139,22 @@ app.post('/api/notify', requireAuth, async (req, res) => {
         
         // Se ainda não tiver mensagem, criar fallback
         if (!finalMessage) {
-            const eventLabels = {
-                'order_created': '🍕 Pedido recebido',
-                'order_preparing': '👩‍🍳 Pedido em preparo',
-                'order_ready': '🚗 Pedido pronto para entrega',
-                'order_completed': '✅ Pedido entregue',
-            };
-            
-            const eventLabel = eventLabels[event] || '📦 Atualização do pedido';
-            finalMessage = `${eventLabel}\n\nPedido #${order?.number || order?.id || 'N/A'}`;
+            if (event) {
+                const eventLabels = {
+                    'order_created': '🍕 Pedido recebido',
+                    'order_preparing': '👩‍🍳 Pedido em preparo',
+                    'order_ready': '🚗 Pedido pronto para entrega',
+                    'order_completed': '✅ Pedido entregue',
+                };
+                
+                const eventLabel = eventLabels[event] || '📦 Atualização do pedido';
+                finalMessage = `${eventLabel}\n\nPedido #${order?.number || order?.id || 'N/A'}`;
+            } else {
+                return clearTimeoutAndRespond(400, { 
+                    success: false,
+                    error: 'Mensagem é obrigatória quando não há dados de pedido' 
+                });
+            }
         }
 
         // Enviar mensagem com timeout interno (6 segundos)
@@ -152,15 +175,15 @@ app.post('/api/notify', requireAuth, async (req, res) => {
             message_length: finalMessage.length
         });
 
-        return res.json({
-            success: true,
-            messageId: result.messageId,
-            sent_at: new Date().toISOString()
-        });
+        if (!res.headersSent) {
+            return res.json({
+                success: true,
+                messageId: result.messageId,
+                sent_at: new Date().toISOString()
+            });
+        }
 
     } catch (error) {
-        clearTimeout(responseTimeout);
-        
         // Se já respondeu, não responder novamente
         if (res.headersSent) {
             logger.error('❌ Erro após resposta já enviada', { error: error.message });
@@ -170,12 +193,13 @@ app.post('/api/notify', requireAuth, async (req, res) => {
         logger.error('❌ Erro ao processar notificação', {
             error: error.message,
             order_id: req.body?.order?.id,
-            event: req.body?.event
+            event: req.body?.event,
+            phone: req.body?.phone || req.body?.customer?.phone
         });
         
         // Se for timeout, retornar 503 com retry
         if (error.message.includes('Timeout') || error.message.includes('timeout')) {
-            return res.status(503).json({ 
+            return clearTimeoutAndRespond(503, { 
                 success: false,
                 error: 'Timeout ao enviar mensagem. WhatsApp pode estar reconectando.',
                 retry: true,
@@ -183,9 +207,9 @@ app.post('/api/notify', requireAuth, async (req, res) => {
             });
         }
         
-        return res.status(500).json({ 
+        return clearTimeoutAndRespond(500, { 
             success: false,
-            error: error.message
+            error: error.message || 'Falha no envio WhatsApp'
         });
     }
 });
