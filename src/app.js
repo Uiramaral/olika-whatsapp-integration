@@ -103,7 +103,7 @@ async function getWhatsAppPhone() {
         const http = require('http');
         const url = require('url');
         
-        const apiUrl = new URL(`${laravelApiUrl}/dashboard/whatsapp/settings`);
+        const apiUrl = new URL(`${laravelApiUrl}/api/whatsapp/settings`);
         const client = apiUrl.protocol === 'https:' ? https : http;
         
         return new Promise((resolve, reject) => {
