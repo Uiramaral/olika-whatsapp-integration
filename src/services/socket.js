@@ -65,22 +65,19 @@ async function startSock(whatsappPhone = null) {
     version,
     logger,
     printQRInTerminal: false,
-    browser: ['OlikaDashboard', 'Safari', '1.0'], // ⚙️ se identifica como Companion App
-    syncFullHistory: true, // ✅ Obrigatório para modo companion
+    browser: ['OlikaDashboard', 'Safari', '1.0'], // identifica o dispositivo como companion app
+    syncFullHistory: true,
     markOnlineOnConnect: false,
     generateHighQualityLinkPreview: false,
     connectTimeoutMs: 60_000,
+    mobile: false, // força modo companion (essencial para pareamento via código)
     auth: state,
-    // ⚠️ Este parâmetro é essencial para o pareamento moderno
-    mobile: false, // força modo companion
   });
 
   global.sock = sock;
 
-  // Capturar phone no escopo para uso no setTimeout
   const phoneForPairing = phone;
 
-  // Evento principal de atualização de conexão
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr, pairingCode } = update;
     const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
@@ -92,11 +89,8 @@ async function startSock(whatsappPhone = null) {
         try {
           if (sock?.requestPairingCode) {
             logger.info('📞 Solicitando código de pareamento...');
-            // ✅ Correção: requestPairingCode precisa do prefixo "+" no número
             const phoneNumber = global.currentWhatsAppPhone || phoneForPairing;
-            const formattedPhone = phoneNumber.startsWith('+')
-              ? phoneNumber
-              : `+${phoneNumber}`;
+            const formattedPhone = phoneNumber.startsWith('+') ? phoneNumber : `+${phoneNumber}`;
             logger.info(`📲 Número formatado para pareamento: ${formattedPhone}`);
             const code = await sock.requestPairingCode(formattedPhone);
             global.currentPairingCode = code;
@@ -128,17 +122,7 @@ async function startSock(whatsappPhone = null) {
     }
   });
 
-  // Salvar credenciais no disco sempre que mudarem
   sock.ev.on('creds.update', saveCreds);
-
-  // 🧹 Watchdog automático a cada 60s (comentado temporariamente para testes de pareamento)
-  // Descomente após o pareamento funcionar corretamente
-  // setInterval(async () => {
-  //   if (!global.isWhatsAppConnected) {
-  //     logger.warn('⚠️ WhatsApp desconectado. Tentando reconectar...');
-  //     await restartWhatsAppConnection();
-  //   }
-  // }, 60000);
 
   return sock;
 }
@@ -151,15 +135,14 @@ async function sendMessage(number, message) {
   const sock = global.sock;
   if (!sock || !isConnected()) throw new Error('WhatsApp não está conectado');
   if (!number || !message) throw new Error('Número e mensagem são obrigatórios');
-  
-  // Normalizar número de telefone
+
   let jid = number.replace(/\D/g, ''); // Remove caracteres não numéricos
   if (!number.includes('@s.whatsapp.net')) {
     jid = `${jid}@s.whatsapp.net`;
   } else {
     jid = number;
   }
-  
+
   const result = await sock.sendMessage(jid, { text: message });
   return {
     success: true,
