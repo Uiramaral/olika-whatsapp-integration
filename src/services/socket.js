@@ -16,11 +16,14 @@ const { Boom } = require("@hapi/boom");
 const fs = require("fs").promises;
 const path = require("path");
 
-const SESSION_PATH = "./auth_info_baileys/5571987019420";
-
 // Número do WhatsApp para gerar código de pareamento
 // Pode ser definido via variável de ambiente WHATSAPP_PHONE
 const WHATSAPP_PHONE = process.env.WHATSAPP_PHONE || "5571987019420";
+
+// ✅ CORREÇÃO: Usar caminho absoluto para garantir compatibilidade com Railway Volume
+// No Railway, o WORKDIR é /app, então o caminho será /app/auth_info_baileys/5571987019420
+const SESSION_BASE_DIR = path.resolve(process.cwd(), "auth_info_baileys");
+const SESSION_PATH = path.resolve(SESSION_BASE_DIR, WHATSAPP_PHONE);
 
 // Usar global.sock para compartilhar referência entre módulos
 global.sock = null;
@@ -32,8 +35,33 @@ const startSock = async () => {
   const { version } = await fetchLatestBaileysVersion();
   const logger = P({ level: "info" });
   
-  // 💾 (D) Verificação de volume Railway antes de usar useMultiFileAuthState
-  logger.info(`📂 Pasta de sessão ativa: ${SESSION_PATH}`);
+  // 💾 Verificação e criação do diretório de sessão
+  try {
+    // Garantir que o diretório base existe
+    await fs.mkdir(SESSION_BASE_DIR, { recursive: true });
+    // Garantir que o diretório da sessão existe
+    await fs.mkdir(SESSION_PATH, { recursive: true });
+    
+    // Verificar se o diretório é gravável
+    await fs.access(SESSION_PATH, fs.constants.W_OK);
+    
+    // Log detalhado para diagnóstico
+    logger.info(`📂 Diretório de trabalho: ${process.cwd()}`);
+    logger.info(`📂 Diretório base de sessões: ${SESSION_BASE_DIR}`);
+    logger.info(`📂 Pasta de sessão ativa (absoluta): ${SESSION_PATH}`);
+    
+    // Listar arquivos existentes para diagnóstico
+    const existingFiles = await fs.readdir(SESSION_PATH).catch(() => []);
+    if (existingFiles.length > 0) {
+      logger.info(`📄 Arquivos de sessão existentes: ${existingFiles.join(", ")}`);
+    } else {
+      logger.warn("⚠️ Nenhum arquivo de sessão encontrado. Nova autenticação será necessária.");
+    }
+  } catch (err) {
+    logger.error(`❌ Erro ao verificar/criar diretório de sessão: ${err.message}`);
+    logger.error(`❌ Caminho tentado: ${SESSION_PATH}`);
+    throw err; // Falhar se não conseguir criar/acessar o diretório
+  }
   
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
 
@@ -222,14 +250,27 @@ const startSock = async () => {
       global.currentQRTimestamp = null;
       global.currentPairingCode = null;
 
-      logger.info("✅ Conectado com sucesso ao WhatsApp!");
-      
-      // Log do estado real
-      const hasUser = !!sock.user;
-      const wsState = sock?.ws?.readyState;
-      logger.info(`🔗 global.sock atualizado APÓS conexão. user: ${hasUser}, wsState: ${wsState}, isWhatsAppConnected: ${global.isWhatsAppConnected}`);
+        logger.info("✅ Conectado com sucesso ao WhatsApp!");
+        
+        // Log do estado real
+        const hasUser = !!sock.user;
+        const wsState = sock?.ws?.readyState;
+        logger.info(`🔗 global.sock atualizado APÓS conexão. user: ${hasUser}, wsState: ${wsState}, isWhatsAppConnected: ${global.isWhatsAppConnected}`);
+        
+        // ✅ Verificar se as credenciais foram salvas
+        try {
+          const credsFile = path.join(SESSION_PATH, "creds.json");
+          const credsExists = await fs.access(credsFile).then(() => true).catch(() => false);
+          if (credsExists) {
+            logger.info(`✅ Credenciais salvas em: ${credsFile}`);
+          } else {
+            logger.warn(`⚠️ Arquivo de credenciais não encontrado em: ${credsFile}`);
+          }
+        } catch (err) {
+          logger.warn(`⚠️ Erro ao verificar credenciais: ${err.message}`);
+        }
 
-      startHeartbeat();
+        startHeartbeat();
     }
 
     if (connection === "close") {
