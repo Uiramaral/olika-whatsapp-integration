@@ -32,9 +32,86 @@ global.currentWhatsAppPhone = null;
 // Usuário conectado (número pareado) - salvo quando conexão abre
 global.whatsappUser = null;
 
+// Variáveis para watchdog de reconexão automática
+global.lastConnectedAt = null;
+global.lastAttemptAt = Date.now();
+
+/**
+ * Função utilitária de restart automático
+ * Encerra conexão atual e inicia nova sessão
+ */
+async function restartWhatsAppConnection() {
+  const logger = P({ level: "info" });
+  
+  if (global.sock) {
+    logger.info("🔁 Encerrando conexão atual antes de reiniciar...");
+    try {
+      if (global.sock.logout) {
+        await global.sock.logout();
+      }
+    } catch (e) {
+      logger.warn("ℹ️ Logout falhou (provavelmente já desconectado):", e.message);
+    }
+    try {
+      if (global.sock.ws) {
+        global.sock.ws.close();
+      }
+      if (global.sock.end) {
+        await global.sock.end();
+      }
+    } catch (e) {
+      logger.warn("ℹ️ Erro ao encerrar socket:", e.message);
+    }
+  }
+  
+  // Limpar estado global
+  global.sock = null;
+  global.isWhatsAppConnected = false;
+  global.whatsappUser = null;
+  global.currentQR = null;
+  global.currentQRTimestamp = null;
+  global.currentPairingCode = null;
+  
+  logger.info("🔁 Iniciando nova sessão WhatsApp automaticamente...");
+  
+  // Buscar número atual (prioridade: global > env > padrão)
+  const phone = global.currentWhatsAppPhone || process.env.WHATSAPP_PHONE || "5571987019420";
+  
+  try {
+    await startSock(phone);
+  } catch (err) {
+    logger.error("❌ Erro ao reiniciar conexão:", err.message);
+    throw err;
+  }
+}
+
 const startSock = async (whatsappPhone = null) => {
   const { version } = await fetchLatestBaileysVersion();
   const logger = P({ level: "info" });
+  
+  // 🔒 Encerrar conexões anteriores ao iniciar nova
+  if (global.sock) {
+    logger.warn("⚠️ Encerrando conexão anterior antes de iniciar nova...");
+    try {
+      await global.sock.logout();
+      logger.info("✅ Logout da conexão anterior realizado");
+    } catch (e) {
+      logger.warn("ℹ️ Logout falhou (provavelmente já desconectado):", e.message);
+    }
+    try {
+      if (global.sock.ws) {
+        global.sock.ws.close();
+      }
+      if (global.sock.end) {
+        await global.sock.end();
+      }
+    } catch (e) {
+      logger.warn("ℹ️ Erro ao encerrar socket anterior:", e.message);
+    }
+    global.sock = null;
+    global.isWhatsAppConnected = false;
+    global.whatsappUser = null;
+  }
   
   // Número do WhatsApp (recebido como parâmetro ou do ambiente)
   // ✅ PRIORIDADE: Parâmetro > Global > .env > Padrão
@@ -288,6 +365,7 @@ const startSock = async (whatsappPhone = null) => {
       // Atualizar estado de conexão
       global.isWhatsAppConnected = true;
       global.sock = sock;
+      global.lastConnectedAt = Date.now(); // Atualizar timestamp para watchdog
       
       // ✅ Salva o usuário logado (por ex: número pareado)
       const userJid = sock.user?.id;
@@ -353,8 +431,8 @@ const startSock = async (whatsappPhone = null) => {
         setTimeout(() => {
           reconnect();
         }, 1000);
-      } else if (reason === 515) {
-        logger.warn("⚠️ Código de erro 515 detectado. Tentando reconectar em 5s...");
+      } else if (reason === 515 || reason === 428) {
+        logger.warn(`⚠️ Código de erro ${reason} detectado. Tentando reconectar em 5s...`);
         setTimeout(() => {
           reconnect();
         }, 5000);
@@ -377,6 +455,38 @@ const startSock = async (whatsappPhone = null) => {
       logger.error("Erro ao salvar credenciais:", err.message);
     }
   });
+
+  // 🔄 Watchdog: Monitora o status e força reset se ficar muito tempo desconectado
+  // Inicializar apenas uma vez (usar flag global para evitar múltiplos intervals)
+  if (!global.watchdogInterval) {
+    logger.info("🔄 Iniciando watchdog de reconexão automática (verificação a cada 30s)");
+    
+    global.watchdogInterval = setInterval(async () => {
+      const now = Date.now();
+      const logger = P({ level: "info" });
+
+      // Se está conectado, atualiza o timestamp
+      if (global.isWhatsAppConnected && global.sock?.ws?.readyState === 1) {
+        global.lastConnectedAt = now;
+        return;
+      }
+
+      // Se está desconectado há mais de 3 minutos, tenta restart automático
+      const lastCheck = global.lastConnectedAt || global.lastAttemptAt;
+      const diff = now - lastCheck;
+      
+      if (diff > 3 * 60 * 1000) { // 3 minutos
+        logger.warn(`⚠️ WhatsApp inativo há mais de ${Math.floor(diff / 60000)} minutos. Reiniciando conexão automaticamente...`);
+        global.lastAttemptAt = now;
+        
+        try {
+          await restartWhatsAppConnection();
+        } catch (err) {
+          logger.error("❌ Falha ao reiniciar automaticamente:", err.message);
+        }
+      }
+    }, 30 * 1000); // checa a cada 30 segundos
+  }
 
   // ⚠️ Tratamento global de exceções
   process.on("uncaughtException", (err) => {
@@ -563,4 +673,5 @@ module.exports = {
   isConnected,
   getSocket,
   disconnect,
+  restartWhatsAppConnection,
 };
