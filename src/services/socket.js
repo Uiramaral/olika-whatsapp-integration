@@ -130,7 +130,27 @@ const startSock = async () => {
       // Armazenar QR Code globalmente para acesso via API
       global.currentQR = qr;
       global.currentQRTimestamp = Date.now(); // Registrar quando foi gerado
+      
+      // Extrair código numérico do QR Code (geralmente está no formato de string)
+      // O QR Code do WhatsApp geralmente contém um código numérico de 8 dígitos
+      let pairingCode = '';
+      try {
+        // Tentar extrair código numérico (8 dígitos consecutivos)
+        const codeMatch = qr.match(/\d{8}/);
+        if (codeMatch) {
+          pairingCode = codeMatch[0];
+        } else {
+          // Se não encontrar, usar hash do QR Code como código
+          pairingCode = qr.substring(0, 8).replace(/[^0-9]/g, '') || qr.substring(0, 8);
+        }
+      } catch (e) {
+        pairingCode = qr.substring(0, 8);
+      }
+      
+      global.currentPairingCode = pairingCode;
+      
       logger.info("📲 Novo código de pareamento gerado. Escaneie rapidamente!");
+      logger.info(`📲 Código de pareamento: ${pairingCode}`);
       logger.info(`📲 QR Code armazenado (tamanho: ${qr.length} caracteres)`);
       logger.info("📲 QR Code disponível via /api/whatsapp/qr");
     }
@@ -146,6 +166,7 @@ const startSock = async () => {
       // Limpar QR Code quando conectado
       global.currentQR = null;
       global.currentQRTimestamp = null;
+      global.currentPairingCode = null;
 
       logger.info("✅ Conectado com sucesso ao WhatsApp!");
       
@@ -163,6 +184,7 @@ const startSock = async () => {
       global.sock = null;
       global.currentQR = null; // Limpar QR Code antigo
       global.currentQRTimestamp = null;
+      global.currentPairingCode = null;
       
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       const uptime = lastConnected
@@ -347,6 +369,8 @@ const disconnect = async () => {
     // Limpar referências
     global.sock = null;
     global.currentQR = null;
+    global.currentQRTimestamp = null;
+    global.currentPairingCode = null;
     global.currentQRTimestamp = null;
     
     // Tentar logout do Baileys (encerra sessão)

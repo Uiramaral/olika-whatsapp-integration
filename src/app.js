@@ -16,6 +16,7 @@ const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || API_TOKEN; // Fallback para A
 // Variável global para armazenar QR Code atual
 global.currentQR = null;
 global.currentQRTimestamp = null; // Timestamp de quando o QR Code foi gerado
+global.currentPairingCode = null; // Código numérico de pareamento
 
 // Middleware de Segurança para endpoints protegidos
 const requireAuth = (req, res, next) => {
@@ -83,6 +84,7 @@ app.get('/api/whatsapp/qr', requireAuth, (req, res) => {
             const ageSeconds = Math.floor((Date.now() - qrTimestamp) / 1000);
             return res.json({ 
                 qr: qr, 
+                pairingCode: global.currentPairingCode || null, // Código numérico de pareamento
                 connected: false, 
                 user: null,
                 qrAge: ageSeconds, // Idade do QR Code em segundos
