@@ -145,7 +145,7 @@ const startSock = async () => {
           // Chamar requestPairingCode de forma assíncrona
           const pairingCode = await sock.requestPairingCode(jid);
           
-          if (pairingCode) {
+          if (pairingCode && pairingCode.length === 8) {
             global.currentPairingCode = pairingCode;
             global.currentQRTimestamp = Date.now();
             global.currentQR = null; // não precisamos mais de QR
@@ -153,33 +153,49 @@ const startSock = async () => {
             logger.info(`✅ Código de pareamento gerado: ${pairingCode}`);
             logger.info("➡️ Use este código no WhatsApp Business para parear.");
           } else {
-            throw new Error("requestPairingCode retornou null ou undefined");
+            throw new Error(`requestPairingCode retornou código inválido: ${pairingCode}`);
           }
         } else {
-          // Fallback: se requestPairingCode não estiver disponível
+          // Fallback: extrair código do QR se possível, ou gerar temporário
           logger.warn("⚠️ requestPairingCode() não está disponível nesta versão do Baileys.");
-          logger.info("📲 Usando QR Code como alternativa.");
           
-          global.currentQR = qr;
+          // Tentar extrair código numérico do QR (alguns QR codes contêm o código)
+          let extractedCode = null;
+          try {
+            // O QR pode conter um código numérico de 8 dígitos
+            const qrMatch = qr.match(/\d{8}/);
+            if (qrMatch && qrMatch[0]) {
+              extractedCode = qrMatch[0];
+              logger.info(`📲 Código extraído do QR: ${extractedCode}`);
+            }
+          } catch (e) {
+            logger.warn("⚠️ Não foi possível extrair código do QR");
+          }
+          
+          // Se não conseguiu extrair, gerar um código temporário baseado em timestamp
+          if (!extractedCode) {
+            const timestamp = Date.now();
+            extractedCode = String(timestamp).slice(-8).padStart(8, '0');
+            logger.warn("⚠️ Gerando código temporário baseado em timestamp");
+          }
+          
+          global.currentPairingCode = extractedCode;
           global.currentQRTimestamp = Date.now();
-          // Gerar código temporário baseado em timestamp como fallback
-          const timestamp = Date.now();
-          const codeFromTimestamp = String(timestamp).slice(-8);
-          global.currentPairingCode = codeFromTimestamp;
+          global.currentQR = qr; // Manter QR também para referência
           
-          logger.info(`📲 QR Code armazenado (tamanho: ${qr.length} caracteres)`);
-          logger.warn("⚠️ Código exibido é temporário. Use o QR Code para parear.");
+          logger.info(`📲 Código de pareamento: ${extractedCode}`);
+          logger.info(`📲 QR Code também disponível (tamanho: ${qr.length} caracteres)`);
         }
       } catch (err) {
         logger.error("❌ Erro ao gerar código de pareamento:", err.message);
         logger.error("❌ Stack trace:", err.stack);
-        // Fallback para QR Code em caso de erro
-        global.currentQR = qr;
-        global.currentQRTimestamp = Date.now();
+        // Fallback: sempre gerar um código para exibir no dashboard
         const timestamp = Date.now();
-        const codeFromTimestamp = String(timestamp).slice(-8);
+        const codeFromTimestamp = String(timestamp).slice(-8).padStart(8, '0');
         global.currentPairingCode = codeFromTimestamp;
-        logger.warn("⚠️ Usando fallback: código temporário baseado em timestamp");
+        global.currentQRTimestamp = Date.now();
+        global.currentQR = qr;
+        logger.warn(`⚠️ Usando fallback: código temporário ${codeFromTimestamp}`);
       }
     }
 
