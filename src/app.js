@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { startSock, sendMessage, isConnected } = require('./services/socket');
+const { startSock, sendMessage, isConnected, disconnect } = require('./services/socket');
 const logger = require('./config/logger');
 
 const app = express();
@@ -94,6 +94,32 @@ app.get('/api/whatsapp/status', requireAuth, (req, res) => {
         res.status(500).json({
             connected: false,
             error: 'Erro ao obter status'
+        });
+    }
+});
+
+// Endpoint para desconectar WhatsApp manualmente
+app.post('/api/whatsapp/disconnect', requireAuth, async (req, res) => {
+    try {
+        const result = await disconnect();
+        
+        if (result.success) {
+            logger.info('🔴 WhatsApp desconectado manualmente via API');
+            res.json({
+                success: true,
+                message: result.message
+            });
+        } else {
+            res.status(400).json({
+                success: false,
+                message: result.message
+            });
+        }
+    } catch (error) {
+        logger.error('Erro ao desconectar WhatsApp:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Erro ao desconectar WhatsApp'
         });
     }
 });

@@ -17,6 +17,9 @@ const SESSION_PATH = "./auth_info_baileys/5571987019420";
 // Usar global.sock para compartilhar referência entre módulos
 global.sock = null;
 
+// Controle de estado de conexão (mais confiável que sock.user)
+global.isWhatsAppConnected = false;
+
 // Log do caminho de sessão para verificar se o volume está montado
 console.log("📁 Usando caminho de sessão:", SESSION_PATH);
 
@@ -68,17 +71,18 @@ const startSock = async () => {
         }
       }
 
-      // Limpar referência antiga
+      // Limpar referência antiga e estado
       if (global.sock === sock) {
         global.sock = null;
+        global.isWhatsAppConnected = false; // Garantir que estado está desatualizado
       }
 
       await new Promise((r) => setTimeout(r, delay));
 
-      // Criar nova instância e atualizar global.sock
+      // Criar nova instância (o estado será atualizado quando connection === "open")
       const newSock = await startSock();
-      global.sock = newSock;
-      logger.info("✅ Reconectado com sucesso!");
+      // Não atualizar global.sock aqui - será atualizado no evento "open"
+      logger.info("🔄 Nova instância criada, aguardando conexão...");
     } catch (err) {
       logger.error("❌ Erro ao tentar reconectar:", err.message);
       // Tentar novamente após 20 segundos
@@ -113,34 +117,40 @@ const startSock = async () => {
     if (connection === "open") {
       reconnectAttempts = 0;
       lastConnected = Date.now();
-      logger.info("✅ Conectado com sucesso ao WhatsApp!");
-
-      // Atualiza global.sock apenas agora (quando conexão está aberta)
+      
+      // Atualizar estado de conexão
+      global.isWhatsAppConnected = true;
       global.sock = sock;
       
       // Limpar QR Code quando conectado
       global.currentQR = null;
 
-      // Log do estado real (usando sock.user para Baileys 6.6+)
+      logger.info("✅ Conectado com sucesso ao WhatsApp!");
+      
+      // Log do estado real
       const hasUser = !!sock.user;
       const wsState = sock?.ws?.readyState;
-      const connected = isConnected();
-      logger.info(`🔗 global.sock atualizado APÓS conexão. user: ${hasUser}, wsState: ${wsState}, conectado: ${connected}`);
+      logger.info(`🔗 global.sock atualizado APÓS conexão. user: ${hasUser}, wsState: ${wsState}, isWhatsAppConnected: ${global.isWhatsAppConnected}`);
 
       startHeartbeat();
     }
 
     if (connection === "close") {
+      // Atualizar estado de conexão imediatamente
+      global.isWhatsAppConnected = false;
+      global.sock = null;
+      
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       const uptime = lastConnected
         ? ((Date.now() - lastConnected) / 60000).toFixed(1)
         : "0";
 
-      logger.warn(`🔴 Desconectado após ${uptime} minutos online. Motivo: ${reason}`);
+      logger.warn(`🔴 WhatsApp desconectado após ${uptime} minutos online. Motivo: ${reason}`);
+      logger.warn("🔴 WhatsApp desconectado — aguardando reconexão...");
 
       if (reason === DisconnectReason.loggedOut) {
         logger.error(
-          "🚫 Sessão encerrada. É necessário novo pareamento (QR Code)."
+          "🚫 Sessão encerrada. Será necessário novo QR Code."
         );
       } else {
         reconnect();
@@ -168,13 +178,18 @@ const startSock = async () => {
   });
 
   // Inicializar referência global (será atualizada quando conexão abrir)
-  // Não atualizar aqui porque sock.ws ainda não existe
+  // Não atualizar isWhatsAppConnected aqui - será atualizado no evento "open"
   global.sock = sock;
+  // Não definir isWhatsAppConnected como true aqui - aguardar evento "open"
 
-  // Log de estado inicial do socket (verificando global.sock para confirmar compartilhamento)
-  // Nota: sock.ws pode não existir ainda neste momento, mas sock.user pode estar disponível
+  // Log de estado inicial do socket
+  // Nota: sock.ws pode não existir ainda neste momento
   if (global.sock?.user || global.sock?.ws?.readyState === 1) {
     logger.info("🟢 Socket está conectado no momento da inicialização.");
+    // Se já estiver conectado, atualizar estado
+    if (global.sock?.ws?.readyState === 1) {
+      global.isWhatsAppConnected = true;
+    }
   } else {
     logger.warn("🕓 Socket inicializado mas aguardando conexão WebSocket.");
   }
@@ -242,23 +257,25 @@ const sendMessage = async (phone, message) => {
 
 /**
  * Verifica se o socket está conectado
- * Compatível com Baileys 6.6+ onde sock.ws pode estar undefined mesmo com conexão ativa
+ * Usa variável global de estado para garantir precisão
  * @returns {boolean}
  */
 const isConnected = () => {
+  // Usar variável global de estado (mais confiável)
+  if (!global.isWhatsAppConnected) {
+    return false;
+  }
+  
+  // Verificar se o socket existe e o WebSocket está aberto
   const sock = global.sock;
   if (!sock) {
     return false;
   }
   
-  // Nova forma de validar conexão no Baileys 6.6+
-  // sock.user é populado assim que a conta está online
-  if (sock.user) return true; // usuário autenticado e ativo
-  
-  // Fallback: verificar WebSocket se disponível
-  if (sock.ws && sock.ws.readyState === 1) return true;
-  
-  return false;
+  // Verificar estado do WebSocket
+  const wsState = sock?.ws?.readyState;
+  // readyState: 1 = OPEN
+  return wsState === 1;
 };
 
 /**
@@ -269,9 +286,68 @@ const getSocket = () => {
   return global.sock;
 };
 
+/**
+ * Desconecta manualmente o WhatsApp
+ * @returns {Promise<{success: boolean, message: string}>}
+ */
+const disconnect = async () => {
+  try {
+    const sock = global.sock;
+    
+    if (!sock) {
+      return {
+        success: false,
+        message: 'WhatsApp já está desconectado'
+      };
+    }
+    
+    // Atualizar estado imediatamente
+    global.isWhatsAppConnected = false;
+    
+    // Fechar WebSocket se existir
+    if (sock.ws) {
+      try {
+        sock.ws.close();
+      } catch (e) {
+        // Ignorar erros ao fechar
+      }
+    }
+    
+    // Limpar referências
+    global.sock = null;
+    global.currentQR = null;
+    
+    // Tentar logout do Baileys (encerra sessão)
+    try {
+      if (sock && typeof sock.logout === 'function') {
+        await sock.logout();
+      } else if (sock && typeof sock.end === 'function') {
+        await sock.end();
+      }
+    } catch (e) {
+      // Pode falhar se já estiver desconectado - ignorar
+      console.log('Logout já estava desconectado ou método não disponível');
+    }
+    
+    console.log('🔴 WhatsApp desconectado manualmente');
+    
+    return {
+      success: true,
+      message: 'WhatsApp desconectado com sucesso. Será necessário novo pareamento.'
+    };
+  } catch (error) {
+    console.error('Erro ao desconectar WhatsApp:', error);
+    return {
+      success: false,
+      message: `Erro ao desconectar: ${error.message}`
+    };
+  }
+};
+
 module.exports = {
   startSock,
   sendMessage,
   isConnected,
   getSocket,
+  disconnect,
 };
