@@ -297,8 +297,14 @@ const startSock = async (whatsappPhone = null) => {
           
           logger.info(`📲 Tentando gerar código de pareamento para ${phoneNumber}...`);
           
-          // ✅ Correção: requestPairingCode espera apenas o número, sem @s.whatsapp.net
-          const pairingCode = await sock.requestPairingCode(phoneNumber);
+          // ✅ Correção: requestPairingCode precisa do prefixo "+" no número
+          // Formato esperado: "+5571987019420" (com +, sem @s.whatsapp.net)
+          const formattedPhone = phoneNumber.startsWith('+')
+            ? phoneNumber
+            : `+${phoneNumber}`;
+          
+          logger.info(`📲 Número formatado para pareamento: ${formattedPhone}`);
+          const pairingCode = await sock.requestPairingCode(formattedPhone);
           
           if (pairingCode && pairingCode.length === 8) {
             global.currentPairingCode = pairingCode;
