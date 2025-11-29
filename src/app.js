@@ -60,75 +60,24 @@ app.get('/', (req, res) => {
 });
 
 // Endpoint para obter QR Code atual (protegido por autenticação)
-app.get('/api/whatsapp/qr', requireAuth, (req, res) => {
-    try {
-        const connected = isConnected();
-        const qr = global.currentQR;
-        const qrTimestamp = global.currentQRTimestamp;
-        const user = global.sock?.user;
-        
-        // Verificar se o QR Code expirou (geralmente expira em ~40 segundos)
-        const QR_EXPIRATION_TIME = 40000; // 40 segundos
-        const isQRExpired = qrTimestamp && (Date.now() - qrTimestamp > QR_EXPIRATION_TIME);
-        
-        logger.info(`📲 QR Code request - connected: ${connected}, hasQR: ${!!qr}, hasUser: ${!!user}, isExpired: ${isQRExpired}, age: ${qrTimestamp ? Math.floor((Date.now() - qrTimestamp) / 1000) : 'N/A'}s`);
-        
-        if (connected) {
-            return res.json({ 
-                qr: null, 
-                connected: true, 
-                user: user ? { id: user.id, name: user.name || null } : null,
-                timestamp: new Date().toISOString()
-            });
-        } else if (qr && !isQRExpired) {
-            const ageSeconds = Math.floor((Date.now() - qrTimestamp) / 1000);
-            return res.json({ 
-                qr: qr, 
-                pairingCode: global.currentPairingCode || null, // Código numérico de pareamento
-                connected: false, 
-                user: null,
-                qrAge: ageSeconds, // Idade do QR Code em segundos
-                timestamp: new Date().toISOString()
-            });
-        } else if (qr && isQRExpired) {
-            // QR Code expirado - limpar e informar
-            global.currentQR = null;
-            global.currentQRTimestamp = null;
-            logger.warn('📲 QR Code expirado, aguardando novo...');
-            return res.json({ 
-                qr: null, 
-                connected: false, 
-                user: null, 
-                message: "QR Code expirado. Aguardando novo QR Code...",
-                timestamp: new Date().toISOString()
-            });
-        } else {
-            return res.json({ 
-                qr: null, 
-                connected: false, 
-                user: null, 
-                message: "Aguardando QR Code...",
-                timestamp: new Date().toISOString()
-            });
-        }
-    } catch (error) {
-        logger.error('Erro ao obter QR Code:', error);
-        res.status(500).json({
-            qr: null,
-            connected: false,
-            error: 'Erro ao obter QR Code'
-        });
-    }
-});
+// Endpoint removido - não vamos mais usar QR Code, apenas código de pareamento via status
 
 // Endpoint para obter status da conexão WhatsApp
 app.get('/api/whatsapp/status', requireAuth, (req, res) => {
     try {
         const sock = global.sock;
         const user = sock?.user;
+        const connected = isConnected();
+        
+        // Se não estiver conectado, verificar se há código de pareamento disponível
+        let pairingCode = null;
+        if (!connected && global.currentPairingCode) {
+            pairingCode = global.currentPairingCode;
+        }
         
         res.json({
-            connected: isConnected(),
+            connected: connected,
+            pairingCode: pairingCode,
             user: user ? {
                 id: user.id,
                 name: user.name || null

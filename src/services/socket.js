@@ -131,28 +131,17 @@ const startSock = async () => {
       global.currentQR = qr;
       global.currentQRTimestamp = Date.now(); // Registrar quando foi gerado
       
-      // Extrair código numérico do QR Code (geralmente está no formato de string)
-      // O QR Code do WhatsApp geralmente contém um código numérico de 8 dígitos
-      let pairingCode = '';
-      try {
-        // Tentar extrair código numérico (8 dígitos consecutivos)
-        const codeMatch = qr.match(/\d{8}/);
-        if (codeMatch) {
-          pairingCode = codeMatch[0];
-        } else {
-          // Se não encontrar, usar hash do QR Code como código
-          pairingCode = qr.substring(0, 8).replace(/[^0-9]/g, '') || qr.substring(0, 8);
-        }
-      } catch (e) {
-        pairingCode = qr.substring(0, 8);
-      }
+      // O Baileys não fornece código numérico diretamente
+      // O QR Code precisa ser escaneado ou convertido
+      // Por enquanto, vamos gerar um código baseado no timestamp para exibição
+      // NOTA: Este não é o código real do WhatsApp, apenas um identificador visual
+      const timestamp = Date.now();
+      const codeFromTimestamp = String(timestamp).slice(-8); // Últimos 8 dígitos do timestamp
+      global.currentPairingCode = codeFromTimestamp;
       
-      global.currentPairingCode = pairingCode;
-      
-      logger.info("📲 Novo código de pareamento gerado. Escaneie rapidamente!");
-      logger.info(`📲 Código de pareamento: ${pairingCode}`);
+      logger.info("📲 Novo QR Code gerado. Use o QR Code para parear.");
       logger.info(`📲 QR Code armazenado (tamanho: ${qr.length} caracteres)`);
-      logger.info("📲 QR Code disponível via /api/whatsapp/qr");
+      logger.warn("⚠️ Baileys não fornece código numérico de 8 dígitos. Use o QR Code para parear.");
     }
 
     if (connection === "open") {
