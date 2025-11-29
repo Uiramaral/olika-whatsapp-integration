@@ -129,8 +129,10 @@ const startSock = async () => {
     if (qr) {
       // Armazenar QR Code globalmente para acesso via API
       global.currentQR = qr;
+      global.currentQRTimestamp = Date.now(); // Registrar quando foi gerado
       logger.info("📲 Novo código de pareamento gerado. Escaneie rapidamente!");
-      logger.info("📲 QR Code atualizado e disponível via /api/whatsapp/qr");
+      logger.info(`📲 QR Code armazenado (tamanho: ${qr.length} caracteres)`);
+      logger.info("📲 QR Code disponível via /api/whatsapp/qr");
     }
 
     if (connection === "open") {
@@ -143,6 +145,7 @@ const startSock = async () => {
       
       // Limpar QR Code quando conectado
       global.currentQR = null;
+      global.currentQRTimestamp = null;
 
       logger.info("✅ Conectado com sucesso ao WhatsApp!");
       
@@ -159,6 +162,7 @@ const startSock = async () => {
       global.isWhatsAppConnected = false;
       global.sock = null;
       global.currentQR = null; // Limpar QR Code antigo
+      global.currentQRTimestamp = null;
       
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       const uptime = lastConnected
@@ -343,6 +347,7 @@ const disconnect = async () => {
     // Limpar referências
     global.sock = null;
     global.currentQR = null;
+    global.currentQRTimestamp = null;
     
     // Tentar logout do Baileys (encerra sessão)
     try {
