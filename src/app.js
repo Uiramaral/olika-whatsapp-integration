@@ -13,6 +13,9 @@ const PORT = process.env.PORT ?? 8080;
 const API_TOKEN = process.env.API_SECRET;
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || API_TOKEN; // Fallback para API_SECRET se WEBHOOK_TOKEN não estiver definido
 
+// Variável global para armazenar QR Code atual
+global.currentQR = null;
+
 // Middleware de Segurança para endpoints protegidos
 const requireAuth = (req, res, next) => {
     const token = req.headers['x-api-token'] || req.headers['x-webhook-token'] || req.headers['x-olika-token'];
@@ -50,6 +53,47 @@ app.get('/', (req, res) => {
             connected: false,
             error: 'Erro ao verificar status',
             timestamp: new Date().toISOString()
+        });
+    }
+});
+
+// Endpoint para obter QR Code atual (protegido por autenticação)
+app.get('/api/whatsapp/qr', requireAuth, (req, res) => {
+    try {
+        res.json({
+            qr: global.currentQR || null,
+            connected: isConnected(),
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        logger.error('Erro ao obter QR Code:', error);
+        res.status(500).json({
+            qr: null,
+            connected: false,
+            error: 'Erro ao obter QR Code'
+        });
+    }
+});
+
+// Endpoint para obter status da conexão WhatsApp
+app.get('/api/whatsapp/status', requireAuth, (req, res) => {
+    try {
+        const sock = global.sock;
+        const user = sock?.user;
+        
+        res.json({
+            connected: isConnected(),
+            user: user ? {
+                id: user.id,
+                name: user.name || null
+            } : null,
+            last_updated: new Date().toISOString()
+        });
+    } catch (error) {
+        logger.error('Erro ao obter status:', error);
+        res.status(500).json({
+            connected: false,
+            error: 'Erro ao obter status'
         });
     }
 });

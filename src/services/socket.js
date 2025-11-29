@@ -104,7 +104,10 @@ const startSock = async () => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
+      // Armazenar QR Code globalmente para acesso via API
+      global.currentQR = qr;
       logger.info("📲 Novo código de pareamento gerado. Escaneie rapidamente!");
+      logger.info("📲 QR Code atualizado e disponível via /api/whatsapp/qr");
     }
 
     if (connection === "open") {
@@ -114,6 +117,9 @@ const startSock = async () => {
 
       // Atualiza global.sock apenas agora (quando conexão está aberta)
       global.sock = sock;
+      
+      // Limpar QR Code quando conectado
+      global.currentQR = null;
 
       // Log do estado real (usando sock.user para Baileys 6.6+)
       const hasUser = !!sock.user;
