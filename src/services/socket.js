@@ -14,7 +14,8 @@ const { Boom } = require("@hapi/boom");
 
 const SESSION_PATH = "./auth_info_baileys/5571987019420";
 
-let globalSock = null;
+// Usar global.sock para compartilhar referência entre módulos
+global.sock = null;
 
 // Log do caminho de sessão para verificar se o volume está montado
 console.log("📁 Usando caminho de sessão:", SESSION_PATH);
@@ -51,7 +52,7 @@ const startSock = async () => {
     }, 30000); // A cada 30 segundos (mais frequente para manter conexão)
   };
 
-  // 🔁 Reconector robusto - fecha socket antigo e atualiza globalSock
+  // 🔁 Reconector robusto - fecha socket antigo e atualiza global.sock
   const reconnect = async () => {
     try {
       reconnectAttempts++;
@@ -68,15 +69,15 @@ const startSock = async () => {
       }
 
       // Limpar referência antiga
-      if (globalSock === sock) {
-        globalSock = null;
+      if (global.sock === sock) {
+        global.sock = null;
       }
 
       await new Promise((r) => setTimeout(r, delay));
 
-      // Criar nova instância e atualizar globalSock
+      // Criar nova instância e atualizar global.sock
       const newSock = await startSock();
-      globalSock = newSock;
+      global.sock = newSock;
       logger.info("✅ Reconectado com sucesso!");
     } catch (err) {
       logger.error("❌ Erro ao tentar reconectar:", err.message);
@@ -111,7 +112,7 @@ const startSock = async () => {
       lastConnected = Date.now();
       logger.info("✅ Conectado com sucesso ao WhatsApp!");
       startHeartbeat();
-      globalSock = sock; // Atualizar referência global
+      global.sock = sock; // Atualizar referência global
     }
 
     if (connection === "close") {
@@ -152,7 +153,7 @@ const startSock = async () => {
   });
 
   // Atualizar referência global imediatamente
-  globalSock = sock;
+  global.sock = sock;
 
   // Log de estado inicial do socket
   if (sock?.ws?.readyState === 1) {
@@ -171,14 +172,16 @@ const startSock = async () => {
  * @returns {Promise<{success: boolean, messageId?: string, error?: string}>}
  */
 const sendMessage = async (phone, message) => {
+  const sock = global.sock;
+  
   // Verificar conexão antes de tentar enviar
-  if (!globalSock) {
+  if (!sock) {
     throw new Error('Socket não está conectado. Aguarde a conexão ser estabelecida.');
   }
   
   // Verificar se o WebSocket está realmente conectado
-  if (globalSock.ws?.readyState !== 1) {
-    throw new Error('WebSocket não está conectado (readyState: ' + (globalSock.ws?.readyState || 'null') + ')');
+  if (sock.ws?.readyState !== 1) {
+    throw new Error('WebSocket não está conectado (readyState: ' + (sock.ws?.readyState || 'null') + ')');
   }
   
   if (!phone || !message) {
@@ -197,7 +200,7 @@ const sendMessage = async (phone, message) => {
   
   try {
     // Timeout interno de 5 segundos para o sendMessage
-    const sendPromise = globalSock.sendMessage(normalizedPhone, { text: message });
+    const sendPromise = sock.sendMessage(normalizedPhone, { text: message });
     const timeoutPromise = new Promise((_, reject) => {
       setTimeout(() => reject(new Error('Timeout interno: sendMessage demorou mais de 5s')), 5000);
     });
@@ -225,12 +228,13 @@ const sendMessage = async (phone, message) => {
  * @returns {boolean}
  */
 const isConnected = () => {
-  if (!globalSock) {
+  const sock = global.sock;
+  if (!sock) {
     return false;
   }
   
   // Verificar estado do WebSocket
-  const wsState = globalSock.ws?.readyState;
+  const wsState = sock.ws?.readyState;
   
   // readyState: 0 = CONNECTING, 1 = OPEN, 2 = CLOSING, 3 = CLOSED
   // Apenas retornar true se estiver OPEN (1)
@@ -242,7 +246,7 @@ const isConnected = () => {
  * @returns {object|null}
  */
 const getSocket = () => {
-  return globalSock;
+  return global.sock;
 };
 
 module.exports = {
