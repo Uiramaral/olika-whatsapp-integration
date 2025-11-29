@@ -65,13 +65,26 @@ async function startSock(whatsappPhone = null) {
     version,
     logger,
     printQRInTerminal: false,
-    browser: ['OlikaDashboard', 'Safari', '1.0'], // identifica o dispositivo como companion app
+    browser: ['OlikaDashboard', 'Chrome', '10.0'], // nome visível no WhatsApp
     syncFullHistory: true,
     markOnlineOnConnect: false,
     generateHighQualityLinkPreview: false,
     connectTimeoutMs: 60_000,
-    mobile: false, // força modo companion (essencial para pareamento via código)
+    mobile: false, // importante: companion mode
     auth: state,
+    // ⚙️ novo parâmetro força comportamento Android Companion
+    userAgent: {
+      platform: 'ANDROID',
+      releaseChannel: 'RELEASE',
+      osVersion: '13',
+      device: 'Pixel 7 Pro',
+      manufacturer: 'Google',
+      buildNumber: 'TP1A.220624.021',
+      mcc: '724',
+      mnc: '005',
+      localeLanguageIso6391: 'pt',
+      localeCountryIso31661Alpha2: 'BR',
+    },
   });
 
   global.sock = sock;
