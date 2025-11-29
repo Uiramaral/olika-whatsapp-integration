@@ -257,9 +257,10 @@ function formatOrderMessage(event, order, customer) {
 }
 
 // 🚀 CRÍTICO: Iniciar servidor HTTP IMEDIATAMENTE (independente do Baileys)
-// O app.listen() deve ser executado de forma síncrona, sem await
-app.listen(PORT, () => {
-    logger.info(`✅ Servidor HTTP rodando na porta ${PORT}`);
+// IMPORTANTE: Escutar em 0.0.0.0 para permitir acesso externo do Railway
+// Sem isso, o Railway não consegue acessar o container (erro "Application failed to respond")
+app.listen(PORT, '0.0.0.0', () => {
+    logger.info(`✅ Servidor HTTP rodando na porta ${PORT} (host: 0.0.0.0)`);
     logger.info(`📡 Endpoints disponíveis:`);
     logger.info(`   - GET  / (health check)`);
     logger.info(`   - POST /send-message (envio simples)`);
