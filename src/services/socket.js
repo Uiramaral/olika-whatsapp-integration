@@ -1,6 +1,6 @@
 /**
  * Olika WhatsApp Integration — socket.js
- * Estável e otimizado para Railway / Baileys 6.6+
+ * Correção: Auto-limpeza de sessão 401 + Pairing Code
  */
 
 const {
@@ -11,254 +11,123 @@ const {
 } = require("@whiskeysockets/baileys");
 const P = require("pino");
 const { Boom } = require("@hapi/boom");
+const fs = require("fs"); // Necessário para limpar a sessão
+const path = require("path");
 
-const SESSION_PATH = "./auth_info_baileys/5571987019420";
-
-// Adicione esta constante para definir se usaremos Pairing Code
+// ⚙️ CONFIGURAÇÕES
 const USE_PAIRING_CODE = true; 
-// Confirme se este é o número correto que receberá o código
-const PHONE_NUMBER = "5571987019420"; 
+const PHONE_NUMBER = "5571987019420"; // Seu número
+const SESSION_NAME = "5571987019420";
+const SESSION_PATH = path.resolve(__dirname, "..", "auth_info_baileys", SESSION_NAME);
 
 let globalSock = null;
-// Variável global para armazenar o código de pareamento
-global.currentPairingCode = null;
+
+// Função auxiliar para limpar a pasta de sessão
+const clearSession = async () => {
+  console.log(`🗑️ Limpando sessão corrompida em: ${SESSION_PATH}`);
+  try {
+    if (fs.existsSync(SESSION_PATH)) {
+      fs.rmSync(SESSION_PATH, { recursive: true, force: true });
+      console.log("✅ Pasta de sessão removida com sucesso.");
+    }
+  } catch (err) {
+    console.error("❌ Erro ao limpar pasta de sessão:", err);
+  }
+};
 
 const startSock = async () => {
   const { version } = await fetchLatestBaileysVersion();
-  const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
-  const logger = P({ level: "info" });
-
-  let sock;
-  let reconnectAttempts = 0;
-  let lastConnected = null;
-  let heartbeatInterval;
-
-  // 🩺 Heartbeat ativo — evita timeout em Railway
-  const startHeartbeat = () => {
-    if (heartbeatInterval) clearInterval(heartbeatInterval);
-    heartbeatInterval = setInterval(() => {
-      try {
-        if (sock?.ws?.readyState === 1) {
-          sock.ws.send("ping");
-          logger.debug("💓 Heartbeat enviado para manter conexão viva");
-        }
-      } catch (err) {
-        logger.warn("Erro ao enviar heartbeat:", err.message);
-      }
-    }, 20000);
-  };
-
-  // 🔁 Reconector com backoff
-  const reconnect = async () => {
-    reconnectAttempts++;
-    const delay = Math.min(30000, 5000 * reconnectAttempts);
-    logger.warn(
-      `Conexão instável. Tentando reconectar em ${delay / 1000}s (tentativa ${reconnectAttempts})...`
-    );
-    await new Promise((r) => setTimeout(r, delay));
-    startSock();
-  };
-
-  // 🚀 Inicializa socket (MODIFICADO)
-  sock = makeWASocket({
-    version,
-    logger,
-    printQRInTerminal: !USE_PAIRING_CODE, // Não imprime QR se for usar código
-    auth: state,
-    browser: ["Ubuntu", "Chrome", "20.0.04"],
-    syncFullHistory: false,
-    markOnlineOnConnect: true,
-    connectTimeoutMs: 60000,
-    defaultQueryTimeoutMs: 60000,
-  });
-
-  // 👇 LÓGICA DE PAREAMENTO ADICIONADA AQUI 👇
-  if (USE_PAIRING_CODE && !state.creds.registered) {
-    // Espera um pouco para garantir que o socket iniciou
-    setTimeout(async () => {
-      try {
-        // Formata o número (remove caracteres não numéricos e adiciona prefixo "+")
-        let codeNumber = PHONE_NUMBER.replace(/[^0-9]/g, "");
-        if (!codeNumber.startsWith('+')) {
-          codeNumber = '+' + codeNumber;
-        }
-        
-        logger.info(`📞 Solicitando código de pareamento para: ${codeNumber}`);
-        
-        // Solicita o código ao WhatsApp
-        const code = await sock.requestPairingCode(codeNumber);
-        
-        // Exibe no log de forma destacada
-        console.log("\n========================================================");
-        console.log(`📠 SEU CÓDIGO DE PAREAMENTO É:   ${code?.match(/.{1,4}/g)?.join("-")}`);
-        console.log("========================================================\n");
-        
-        // Disponibiliza para o app.js (se precisar puxar via API)
-        global.currentPairingCode = code;
-        
-      } catch (err) {
-        logger.error("Falha ao solicitar código de pareamento:", err);
-      }
-    }, 3000); // Delay de 3 segundos para estabilidade
+  
+  // Garante que a pasta existe antes de usar
+  if (!fs.existsSync(SESSION_PATH)) {
+    fs.mkdirSync(SESSION_PATH, { recursive: true });
   }
 
-  // 🧠 Eventos principais
+  const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
+  const logger = P({ level: "silent" }); // Reduzido para silent para focar no que importa
+
+  console.log(`🚀 Iniciando Socket WhatsApp (v${version.join(".")})`);
+
+  const sock = makeWASocket({
+    version,
+    logger,
+    printQRInTerminal: !USE_PAIRING_CODE,
+    auth: state,
+    browser: ["Ubuntu", "Chrome", "20.0.04"],
+    markOnlineOnConnect: true,
+    connectTimeoutMs: 60000,
+  });
+
+  // 🩺 Lógica de Pareamento (Pairing Code)
+  if (USE_PAIRING_CODE && !sock.authState.creds.registered) {
+    console.log("⏳ Aguardando socket estabilizar para solicitar código...");
+    
+    setTimeout(async () => {
+      try {
+        const codeNumber = PHONE_NUMBER.replace(/[^0-9]/g, "");
+        const code = await sock.requestPairingCode(codeNumber);
+        
+        console.log("\n#################################################");
+        console.log(`📠 CÓDIGO DE PAREAMENTO: ${code?.match(/.{1,4}/g)?.join("-")}`);
+        console.log("#################################################\n");
+        
+        global.currentPairingCode = code;
+      } catch (err) {
+        console.error("⚠️ Falha ao solicitar código (possível reinício necessário):", err.message);
+      }
+    }, 5000); // Aumentei para 5s para dar tempo do socket conectar
+  }
+
+  // 🧠 Eventos do Socket
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
-      logger.info("📲 Novo código de pareamento gerado. Escaneie rapidamente!");
-    }
-
     if (connection === "open") {
-      reconnectAttempts = 0;
-      lastConnected = Date.now();
-      logger.info("✅ Conectado com sucesso ao WhatsApp!");
-      startHeartbeat();
-      globalSock = sock; // Atualizar referência global
+      console.log("✅ CONECTADO AO WHATSAPP COM SUCESSO!");
+      globalSock = sock;
     }
 
     if (connection === "close") {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      const uptime = lastConnected
-        ? ((Date.now() - lastConnected) / 60000).toFixed(1)
-        : "0";
+      
+      console.log(`🔴 Conexão fechada. Motivo: ${reason}`);
 
-      logger.warn(`🔴 Desconectado após ${uptime} minutos online. Motivo: ${reason}`);
-
+      // SE O MOTIVO FOR 401 (Logged Out) -> LIMPEZA AUTOMÁTICA
       if (reason === DisconnectReason.loggedOut) {
-        logger.error(
-          "🚫 Sessão encerrada. É necessário novo pareamento (QR Code)."
-        );
+        console.error("🚫 Credenciais inválidas (401). Iniciando limpeza automática...");
+        await clearSession(); // Apaga a pasta
+        console.log("🔄 Reiniciando socket do zero...");
+        startSock(); // Reinicia limpo
       } else {
-        reconnect();
+        // Outros erros (internet, timeout) -> Reconecta normal
+        console.log("🔄 Tentando reconectar...");
+        startSock();
       }
     }
   });
 
-  // 🔐 Salvamento seguro das credenciais
-  sock.ev.on("creds.update", async () => {
-    try {
-      await saveCreds();
-      logger.info("💾 Credenciais atualizadas com sucesso!");
-    } catch (err) {
-      logger.error("Erro ao salvar credenciais:", err.message);
-    }
-  });
+  sock.ev.on("creds.update", saveCreds);
 
-  // 📨 Tratamento de mensagens e notificações do WhatsApp
-  sock.ev.on("messages.upsert", async (m) => {
-    const messages = m.messages || [];
-    for (const msg of messages) {
-      if (!msg.key.fromMe && msg.message) {
-        // Mensagem recebida - pode processar aqui se necessário
-        logger.debug("Mensagem recebida", { from: msg.key.remoteJid, id: msg.key.id });
-      }
-    }
-  });
-
-  // 🔕 Ignorar notificações não críticas do WhatsApp (evita logs desnecessários)
-  sock.ev.on("notifications", (notification) => {
-    // Ignorar notificações de newsletter e atualizações de perfil
-    if (notification && notification.type === "notification") {
-      const node = notification.node;
-      if (node && node.content) {
-        const update = node.content[0];
-        if (update && update.attrs && update.attrs.op_name) {
-          const opName = update.attrs.op_name;
-          // Ignorar notificações conhecidas que não são críticas
-          if (opName.includes("newsletter") || 
-              opName.includes("linked_profiles") ||
-              opName.includes("status")) {
-            // Silenciar - não são erros, apenas notificações do WhatsApp
-            return;
-          }
-        }
-      }
-    }
-    // Logar outras notificações se necessário
-    logger.debug("Notificação recebida", { type: notification?.type });
-  });
-
-  // ⚠️ Tratamento global de exceções
-  process.on("uncaughtException", (err) => {
-    logger.error("Erro não tratado:", err);
-  });
-
-  process.on("unhandledRejection", (reason) => {
-    logger.error("Promise rejeitada sem tratamento:", reason);
-  });
+  // Tratamento de mensagens simples (para manter vivo)
+  sock.ev.on("messages.upsert", () => {});
 
   globalSock = sock;
   return sock;
 };
 
-// 🟢 Inicialização segura
+// Inicialização
 (async () => {
-  try {
-    const sock = await startSock();
-    console.log("🚀 Olika WhatsApp socket iniciado com sucesso.");
-  } catch (err) {
-    console.error("❌ Falha ao iniciar o socket:", err);
-  }
+  await startSock();
 })();
 
-/**
- * Envia mensagem via WhatsApp
- * @param {string} phone - Número do telefone (formato: 5511999999999 ou 5511999999999@s.whatsapp.net)
- * @param {string} message - Mensagem a ser enviada
- * @returns {Promise<{success: boolean, messageId?: string, error?: string}>}
- */
+// Exportações para o app.js
 const sendMessage = async (phone, message) => {
-  if (!globalSock) {
-    throw new Error('Socket não está conectado. Aguarde a conexão ser estabelecida.');
-  }
-  
-  if (!phone || !message) {
-    throw new Error('Phone e message são obrigatórios');
-  }
-  
-  // Normalizar número de telefone
-  let normalizedPhone = phone.replace(/\D/g, ''); // Remove caracteres não numéricos
-  
-  // Se não terminar com @s.whatsapp.net, adicionar
-  if (!phone.includes('@s.whatsapp.net')) {
-    normalizedPhone = `${normalizedPhone}@s.whatsapp.net`;
-  } else {
-    normalizedPhone = phone;
-  }
-  
-  try {
-    const result = await globalSock.sendMessage(normalizedPhone, { text: message });
-    
-    return {
-      success: true,
-      messageId: result?.key?.id,
-    };
-  } catch (error) {
-    console.error('Erro ao enviar mensagem:', error);
-    throw new Error(`Falha ao enviar mensagem: ${error.message}`);
-  }
+  if (!globalSock) throw new Error("WhatsApp não conectado");
+  const jid = phone.includes("@s.whatsapp.net") ? phone : `${phone.replace(/\D/g, "")}@s.whatsapp.net`;
+  return await globalSock.sendMessage(jid, { text: message });
 };
 
-/**
- * Verifica se o socket está conectado
- * @returns {boolean}
- */
-const isConnected = () => {
-  return globalSock !== null && globalSock.ws?.readyState === 1;
-};
+const isConnected = () => globalSock?.ws?.readyState === 1;
+const getSocket = () => globalSock;
 
-/**
- * Obtém a instância do socket (para uso interno)
- * @returns {object|null}
- */
-const getSocket = () => {
-  return globalSock;
-};
-
-module.exports = {
-  sendMessage,
-  isConnected,
-  getSocket,
-};
+module.exports = { sendMessage, isConnected, getSocket, startSock };
