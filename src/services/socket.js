@@ -320,7 +320,7 @@ const startSock = async (whatsappPhone = null) => {
           if (sock && sock.requestPairingCode) {
             logger.info("📱 Tentando gerar código de pareamento via requestPairingCode()...");
             
-            // ✅ Usar número global (prioridade) ou do escopo capturado
+            // ✅ Usar número global ou do escopo capturado
             const phoneNumber = global.currentWhatsAppPhone || phoneForPairing;
             
             // ✅ Correção: requestPairingCode precisa do prefixo "+" no número
@@ -329,7 +329,7 @@ const startSock = async (whatsappPhone = null) => {
               ? phoneNumber
               : `+${phoneNumber}`;
             
-            logger.info(`📲 Número para pareamento: ${formattedPhone}`);
+            logger.info(`📲 Número formatado para pareamento: ${formattedPhone}`);
             const code = await sock.requestPairingCode(formattedPhone);
             
             if (code && code.length === 8) {
