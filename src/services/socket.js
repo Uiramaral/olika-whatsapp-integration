@@ -1,8 +1,3 @@
-/**
- * Olika WhatsApp Integration — socket.js (Versão Final "Blindada")
- * Funcionalidades: Pairing Code, Auto-Restart 401, Validação de Número (9º dígito)
- */
-
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -13,138 +8,135 @@ const P = require("pino");
 const { Boom } = require("@hapi/boom");
 const fs = require("fs");
 const path = require("path");
+const axios = require('axios');
 
-// ⚙️ CONFIGURAÇÕES GLOBAIS
-const USE_PAIRING_CODE = true; 
-const PHONE_NUMBER = "5571987019420"; // Seu número principal
-const SESSION_NAME = "5571987019420";
-const SESSION_PATH = path.resolve(__dirname, "..", "..", "auth_info_baileys", SESSION_NAME);
+// Caminhos e Configurações
+const BASE_AUTH_DIR = path.resolve(__dirname, "..", "..", "auth_info_baileys");
+const CONFIG_FILE = path.join(BASE_AUTH_DIR, "session_config.json");
+const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://devdashboard.menuolika.com.br/api/whatsapp/webhook";
 
 let globalSock = null;
 let isSocketConnected = false;
+let currentPhone = null;
 
-// 🗑️ Helper: Limpa sessão corrompida
-const clearSession = async () => {
-  console.log(`🗑️ [Auto-Clean] Limpando sessão em: ${SESSION_PATH}`);
+// --- Persistência (Lê qual número este container deve usar) ---
+const loadConfig = () => {
   try {
-    if (fs.existsSync(SESSION_PATH)) {
-      fs.rmSync(SESSION_PATH, { recursive: true, force: true });
-      console.log("✅ Pasta de sessão removida.");
+    if (fs.existsSync(CONFIG_FILE)) {
+      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')).phone;
     }
-  } catch (err) {
-    console.error("❌ Erro ao limpar sessão:", err);
-  }
+  } catch (e) { return null; }
+  return null;
 };
 
-const startSock = async () => {
-  const { version } = await fetchLatestBaileysVersion();
-  
-  if (!fs.existsSync(SESSION_PATH)) {
-    fs.mkdirSync(SESSION_PATH, { recursive: true });
+const saveConfig = (phone) => {
+  if (!fs.existsSync(BASE_AUTH_DIR)) fs.mkdirSync(BASE_AUTH_DIR, { recursive: true });
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify({ phone }));
+};
+
+// --- Socket Logic ---
+const startSock = async (phoneOverride = null) => {
+  const phoneToUse = phoneOverride || loadConfig() || process.env.WHATSAPP_PHONE;
+
+  if (!phoneToUse) {
+    console.log("⚠️ AGUARDANDO COMANDO: Envie POST /connect com { phone: '...' }");
+    return null;
   }
 
-  const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
-  const logger = P({ level: "silent" }); // Silent para logs limpos
+  if (currentPhone !== phoneToUse) {
+    currentPhone = phoneToUse;
+    saveConfig(currentPhone);
+  }
 
-  console.log(`🚀 Iniciando Socket (v${version.join(".")})`);
+  const sessionPath = path.join(BASE_AUTH_DIR, currentPhone);
+  if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
+
+  const { version } = await fetchLatestBaileysVersion();
+  const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+
+  // Reset do socket anterior
+  if (globalSock) { try { globalSock.end(); } catch {} }
+
+  console.log(`🚀 Iniciando para: ${currentPhone}`);
 
   const sock = makeWASocket({
     version,
-    logger,
-    printQRInTerminal: !USE_PAIRING_CODE,
+    logger: P({ level: "silent" }),
+    printQRInTerminal: false,
     auth: state,
     browser: ["Ubuntu", "Chrome", "20.0.04"],
     markOnlineOnConnect: true,
     connectTimeoutMs: 60000,
   });
 
-  // 🩺 Lógica de Pareamento (Só executa se não estiver registrado)
-  if (USE_PAIRING_CODE && !sock.authState.creds.registered) {
-    console.log("⏳ Aguardando estabilização para gerar código...");
+  // Pairing Code Logic
+  if (!sock.authState.creds.registered) {
+    console.log("⏳ Gerando código de pareamento...");
     setTimeout(async () => {
       try {
-        const codeNumber = PHONE_NUMBER.replace(/[^0-9]/g, "");
-        const code = await sock.requestPairingCode(codeNumber);
-        console.log("\n#################################################");
-        console.log(`📠 CÓDIGO DE PAREAMENTO: ${code?.match(/.{1,4}/g)?.join("-")}`);
-        console.log("#################################################\n");
+        const code = await sock.requestPairingCode(currentPhone.replace(/\D/g, ""));
+        console.log(`\n📠 CÓDIGO (${currentPhone}): ${code?.match(/.{1,4}/g)?.join("-")}\n`);
         global.currentPairingCode = code;
-      } catch (err) {
-        console.error("⚠️ Aviso: Não foi possível gerar código (pode já estar conectado).");
-      }
-    }, 5000);
+      } catch (err) { console.error("Erro pairing:", err.message); }
+    }, 4000);
   }
 
-  // 🧠 Monitoramento de Eventos
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect } = update;
-
     if (connection === "open") {
-      console.log("✅ CONECTADO OFICIALMENTE AO WHATSAPP!");
+      console.log(`✅ ${currentPhone} CONECTADO!`);
       globalSock = sock;
-      isSocketConnected = true; 
+      isSocketConnected = true;
     }
-
     if (connection === "close") {
       isSocketConnected = false;
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      console.log(`🔴 Desconectado. Motivo: ${reason}`);
-
-      // Se for 401 (Logoff), limpa tudo e reinicia
       if (reason === DisconnectReason.loggedOut) {
-        console.error("🚫 Sessão inválida (401). Executando limpeza...");
-        await clearSession();
-        startSock(); 
+        console.error("🚫 401 Logged Out. Limpando...");
+        fs.rmSync(sessionPath, { recursive: true, force: true });
+        startSock();
       } else {
-        console.log("🔄 Tentando reconexão automática...");
         startSock();
       }
     }
   });
 
-  sock.ev.on("creds.update", saveCreds);
-  sock.ev.on("messages.upsert", () => {}); // Mantém socket vivo
+  // Webhook para IA (Laravel)
+  sock.ev.on("messages.upsert", async (m) => {
+    const msg = m.messages[0];
+    if (!msg.key.fromMe && m.type === "notify" && !msg.key.remoteJid.includes("@g.us")) {
+      const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
+      if (text) {
+        axios.post(WEBHOOK_URL, {
+          phone: msg.key.remoteJid.replace("@s.whatsapp.net", ""),
+          instance_phone: currentPhone, // CRUCIAL: Identifica a instância
+          message: text
+        }).catch(() => {});
+      }
+    }
+  });
 
+  sock.ev.on("creds.update", saveCreds);
   globalSock = sock;
   return sock;
 };
 
-// Inicialização imediata
+// Start automático
 (async () => { await startSock(); })();
 
-// 📤 Função de Envio Inteligente (Corrige 9º Dígito)
+// API Export
 const sendMessage = async (phone, message) => {
-  if (!globalSock || !isSocketConnected) {
-    throw new Error("WhatsApp desconectado ou reconectando.");
-  }
-
-  // 1. Limpa o número
-  const cleanPhone = phone.replace(/\D/g, "");
+  if (!globalSock || !isSocketConnected) throw new Error("Offline");
   
-  // 2. Define JID para verificação
-  const checkJid = cleanPhone.includes("@s.whatsapp.net") 
-    ? cleanPhone 
-    : `${cleanPhone}@s.whatsapp.net`;
-
-  try {
-    // 3. Pergunta ao WhatsApp qual é o ID real (com ou sem 9)
-    const [result] = await globalSock.onWhatsApp(checkJid);
-
-    if (!result || !result.exists) {
-      throw new Error(`Número ${cleanPhone} não possui conta no WhatsApp.`);
-    }
-
-    // 4. Envia para o JID correto retornado pela API
-    const msgResult = await globalSock.sendMessage(result.jid, { text: message });
-    return { success: true, messageId: msgResult?.key?.id, sentTo: result.jid };
-
-  } catch (err) {
-    console.error(`❌ Falha no envio para ${phone}:`, err.message);
-    throw new Error(err.message);
-  }
+  // Corrige 9º dígito validando no WhatsApp
+  const cleanPhone = phone.replace(/\D/g, "");
+  const checkJid = cleanPhone.includes("@s.whatsapp.net") ? cleanPhone : `${cleanPhone}@s.whatsapp.net`;
+  
+  const [result] = await globalSock.onWhatsApp(checkJid);
+  if (!result?.exists) throw new Error("Número inválido");
+  
+  const sent = await globalSock.sendMessage(result.jid, { text: message });
+  return { success: true, messageId: sent.key.id };
 };
 
-const isConnected = () => isSocketConnected;
-const getSocket = () => globalSock;
-
-module.exports = { sendMessage, isConnected, getSocket, startSock };
+module.exports = { sendMessage, startSock, isConnected: () => isSocketConnected, getCurrentPhone: () => currentPhone };

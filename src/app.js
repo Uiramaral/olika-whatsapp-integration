@@ -268,10 +268,12 @@ app.post('/api/whatsapp/clear-auth', requireAuth, async (req, res) => {
     }
 });
 
-// Força nova conexão
+// Força nova conexão (Aceita número via body para multi-instâncias)
 app.post('/api/whatsapp/connect', requireAuth, async (req, res) => {
     try {
-        logger.info('🔌 Solicitação de conexão WhatsApp recebida');
+        logger.info('🔌 Solicitação de conexão WhatsApp recebida', { body: req.body });
+
+        const { phone } = req.body; // Recebe o número do Laravel
 
         if (global.isConnecting) {
             logger.info('⏳ Conexão já em andamento...');
@@ -279,6 +281,20 @@ app.post('/api/whatsapp/connect', requireAuth, async (req, res) => {
         }
 
         global.isConnecting = true;
+
+        if (phone) {
+            // Inicia processo para este número específico
+            logger.info(`📱 Iniciando conexão para número: ${phone}`);
+            await startSock(phone);
+            global.isConnecting = false;
+            return res.json({ 
+                success: true, 
+                message: `Configurando ${phone}...`,
+                phone: phone
+            });
+        }
+
+        // Reconecta o atual (compatibilidade com código antigo)
         await restartWhatsAppConnection();
         global.isConnecting = false;
 
