@@ -23,7 +23,7 @@ let globalSock = null;
 let isSocketConnected = false;
 let currentPhone = null;
 
-// --- Persistência ---
+// --- Helpers de Persistência ---
 const loadConfig = () => {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
@@ -38,12 +38,15 @@ const saveConfig = (phone) => {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify({ phone }));
 };
 
-// --- Socket Logic ---
+// --- Função Core: Start do Socket ---
 const startSock = async (phoneOverride = null) => {
   const phoneToUse = phoneOverride || loadConfig() || process.env.WHATSAPP_PHONE;
 
   if (!phoneToUse) {
-    console.log("⚠️ AGUARDANDO COMANDO: Envie POST /connect com { phone: '...' }");
+    console.log("⚠️ MODO STANDBY: Nenhum número configurado. Aguardando POST /connect.");
+    globalSock = null;
+    isSocketConnected = false;
+    currentPhone = null; // Garante que o estado seja limpo
     return null;
   }
 
@@ -58,7 +61,6 @@ const startSock = async (phoneOverride = null) => {
   const { version } = await fetchLatestBaileysVersion();
   const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
-  // Limpa instância anterior
   if (globalSock) { try { globalSock.end(); } catch {} }
 
   console.log(`🚀 Iniciando Socket para: ${currentPhone} (v${version.join(".")})`);
@@ -73,14 +75,14 @@ const startSock = async (phoneOverride = null) => {
     },
     browser: ["Ubuntu", "Chrome", "20.0.04"], 
     markOnlineOnConnect: true,
-    generateHighQualityLinkPreview: true,
     syncFullHistory: false,
     msgRetryCounterCache,
     connectTimeoutMs: 60000,
   });
 
+  // Geração do Código de Pareamento
   if (!sock.authState.creds.registered) {
-    console.log("⏳ Aguardando estabilização para pedir código (7s)...");
+    console.log("⏳ Aguardando (7s) para pedir código...");
     setTimeout(async () => {
       try {
         const code = await sock.requestPairingCode(currentPhone.replace(/\D/g, ""));
@@ -94,6 +96,7 @@ const startSock = async (phoneOverride = null) => {
     }, 7000); 
   }
 
+  // Monitoramento de Conexão
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect } = update;
 
@@ -101,53 +104,45 @@ const startSock = async (phoneOverride = null) => {
       console.log(`✅ ${currentPhone} CONECTADO!`);
       globalSock = sock;
       isSocketConnected = true;
-
-      // 🔔 NOVO: Avisa o Laravel que CONECTOU
-      axios.post(WEBHOOK_URL, {
-        type: 'connection_update', // Identificador do evento
-        instance_phone: currentPhone,
-        status: 'CONNECTED'
-      }).catch(err => console.error("⚠️ Falha ao avisar Laravel (Conectado):", err.message));
+      global.currentPairingCode = null;
+      
+      // 🔔 Webhook de Status (Notifica o Laravel)
+      axios.post(WEBHOOK_URL, { type: 'connection_update', instance_phone: currentPhone, status: 'CONNECTED' }).catch(() => {});
     }
 
     if (connection === "close") {
       isSocketConnected = false;
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      
       console.log(`🔴 Desconectado (${reason}). Analisando...`);
 
-      // 🔔 NOVO: Avisa o Laravel que CAIU
-      axios.post(WEBHOOK_URL, {
-        type: 'connection_update',
-        instance_phone: currentPhone,
-        status: 'DISCONNECTED'
-      }).catch(() => {}); // Ignora erro de webhook na desconexão
+      // 🔔 Webhook de Status (Notifica o Laravel)
+      axios.post(WEBHOOK_URL, { type: 'connection_update', instance_phone: currentPhone, status: 'DISCONNECTED' }).catch(() => {});
 
-      // 🚨 VOLTAMOS COM A LIMPEZA AUTOMÁTICA (Agora é seguro com browser Ubuntu)
-      if (reason === DisconnectReason.loggedOut) {
-        console.warn("🚫 Dispositivo desconectado pelo celular (401). Limpando sessão...");
+
+      // 🚨 MODO STANDBY: Se for LOGGED OUT (401), LIMPA E PARAR DE TENTAR
+      if (reason === DisconnectReason.loggedOut || reason === 401) {
+        console.error("🚫 LOGOUT FATAL: Sessão inválida/removida. Entrando em modo STANDBY...");
         
-        // Encerra socket atual para liberar arquivos
-        if (globalSock) { try { globalSock.end(); } catch {} }
-        
-        // Apaga a pasta da sessão
+        // 1. Limpeza de arquivos
         const sessionPath = path.join(BASE_AUTH_DIR, currentPhone);
         if (fs.existsSync(sessionPath)) {
             fs.rmSync(sessionPath, { recursive: true, force: true });
-            console.log("🗑️ Sessão inválida removida.");
+            console.log("🗑️ Sessão removida. Aguardando /connect.");
         }
         
-        // Reinicia do zero para gerar novo código
-        setTimeout(() => startSock(), 1000);
+        // 2. Desativa o socket global
+        globalSock = null;
+        global.currentPairingCode = null;
         
       } else {
-        // Outros erros (queda de internet, 500, 515) -> SÓ RECONECTA
-        console.log("🔄 Queda temporária. Reconectando...");
+        // Outros erros (network, 500, etc.) -> Reconecta
+        console.log("🔄 Queda temporária. Tentando reconectar...");
         startSock();
       }
     }
   });
 
+  // Eventos Mantidos
   sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
     if (!msg.key.fromMe && m.type === "notify" && !msg.key.remoteJid.includes("@g.us")) {
@@ -161,15 +156,15 @@ const startSock = async (phoneOverride = null) => {
       }
     }
   });
-
   sock.ev.on("creds.update", saveCreds);
+
   globalSock = sock;
   return sock;
 };
 
-// --- Função de Reset Manual (O Botão de Pânico) ---
+// --- Funções de Controle ---
 const forceLogout = async () => {
-  console.log("🚨 COMANDO DE RESET RECEBIDO!");
+  console.log("🚨 RESET MANUAL INICIADO!");
   
   if (globalSock) {
     try { globalSock.end(); } catch {}
@@ -180,27 +175,29 @@ const forceLogout = async () => {
   const phone = currentPhone || loadConfig();
   if (phone) {
     const sessionPath = path.join(BASE_AUTH_DIR, phone);
-    console.warn(`🗑️ APAGANDO SESSÃO: ${sessionPath}`);
+    console.warn(`🗑️ APAGANDO: ${sessionPath}`);
     if (fs.existsSync(sessionPath)) {
       fs.rmSync(sessionPath, { recursive: true, force: true });
     }
   }
 
-  console.log("🔄 Reiniciando sistema limpo...");
-  await startSock();
-  return { success: true, message: "Sessão resetada. Aguarde novo código." };
+  // Não chama startSock() aqui, deixa o sistema em STANDBY
+  return { success: true, message: "Sessão resetada. Chame /connect para novo pareamento." };
 };
 
 (async () => { await startSock(); })();
 
+// --- Exportações (CRUCIAL) ---
 const sendMessage = async (phone, message) => {
-  if (!globalSock || !isSocketConnected) throw new Error("Offline");
-  const cleanPhone = phone.replace(/\D/g, "");
-  const checkJid = cleanPhone.includes("@s.whatsapp.net") ? cleanPhone : `${cleanPhone}@s.whatsapp.net`;
-  const [result] = await globalSock.onWhatsApp(checkJid);
-  if (!result?.exists) throw new Error("Número inválido");
-  const sent = await globalSock.sendMessage(result.jid, { text: message });
-  return { success: true, messageId: sent.key.id };
+    if (!globalSock || !isSocketConnected) throw new Error("Offline");
+    const cleanPhone = phone.replace(/\D/g, "");
+    const checkJid = cleanPhone.includes("@s.whatsapp.net") ? cleanPhone : `${cleanPhone}@s.whatsapp.net`;
+    const [result] = await globalSock.onWhatsApp(checkJid);
+    if (!result?.exists) throw new Error("Número inválido");
+    const sent = await globalSock.sendMessage(result.jid, { text: message });
+    return { success: true, messageId: sent.key.id };
 };
+const isConnected = () => isSocketConnected;
+const getCurrentPhone = () => currentPhone;
 
-module.exports = { sendMessage, startSock, isConnected: () => isSocketConnected, getCurrentPhone: () => currentPhone, forceLogout };
+module.exports = { sendMessage, startSock, isConnected, getCurrentPhone, forceLogout };

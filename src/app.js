@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { startSock, sendMessage, isConnected, restartWhatsAppConnection, forceLogout } = require('./services/socket');
+const { startSock, sendMessage, isConnected, forceLogout, getCurrentPhone } = require('./services/socket');
 const logger = require('./config/logger');
 
 const app = express();
@@ -64,26 +64,15 @@ app.get('/', (req, res) => {
 // Endpoint para obter QR Code atual (protegido por autenticação)
 // Endpoint removido - não vamos mais usar QR Code, apenas código de pareamento via status
 
-// Status detalhado do WhatsApp
-app.get('/api/whatsapp/status', requireAuth, async (req, res) => {
-    try {
-        const connected = isConnected();
-        const pairingCode = connected ? null : (global.currentPairingCode || null);
-        const user = global.whatsappUser || null;
-
-        res.json({
-            connected,
-            pairingCode,
-            user: user ? {
-                id: user.id || user,
-                name: user.name || null
-            } : null,
-            last_updated: new Date().toISOString()
-        });
-    } catch (err) {
-        logger.error('Erro ao obter status WhatsApp:', err);
-        res.status(500).json({ connected: false, error: 'Erro ao obter status' });
-    }
+// --- Rota de Status (GET /status) ---
+// Permite que o Dashboard (Laravel) leia o status
+app.get('/api/whatsapp/status', requireAuth, (req, res) => {
+    res.json({
+        isConnected: isConnected(), // Retorna true ou false
+        pairingCode: global.currentPairingCode || null, // Retorna o código se estiver esperando pareamento
+        currentPhone: getCurrentPhone() || null, // Retorna o número que está ativo/configurado
+        message: isConnected() ? 'Conectado e Operacional' : (global.currentPairingCode ? 'Aguardando Pareamento' : 'Em Standby (Offline)')
+    });
 });
 
 // Função para buscar número do WhatsApp do banco de dados
@@ -268,125 +257,28 @@ app.post('/api/whatsapp/clear-auth', requireAuth, async (req, res) => {
     }
 });
 
-// Força nova conexão (Aceita número via body para multi-instâncias)
+// --- Rota de Conexão (POST /connect) ---
+// Essencial para tirar o sistema do STANDBY e gerar um novo código
 app.post('/api/whatsapp/connect', requireAuth, async (req, res) => {
     try {
-        logger.info('🔌 Solicitação de conexão WhatsApp recebida', { body: req.body });
-
-        const { phone } = req.body; // Recebe o número do Laravel
-
-        if (global.isConnecting) {
-            logger.info('⏳ Conexão já em andamento...');
-            return res.json({ message: 'Conexão já em andamento.' });
+        const { phone } = req.body;
+        if (!phone) {
+            return res.status(400).json({ error: 'O número de telefone (phone) é obrigatório no corpo da requisição.' });
         }
+        
+        // Inicia ou configura o número e tenta gerar o código
+        await startSock(phone);
 
-        global.isConnecting = true;
-
-        if (phone) {
-            // Inicia processo para este número específico
-            logger.info(`📱 Iniciando conexão para número: ${phone}`);
-            await startSock(phone);
-            global.isConnecting = false;
-            return res.json({ 
-                success: true, 
-                message: `Configurando ${phone}...`,
-                phone: phone
-            });
-        }
-
-        // Reconecta o atual (compatibilidade com código antigo)
-        await restartWhatsAppConnection();
-        global.isConnecting = false;
-
-        res.json({ message: 'Reconexão iniciada com sucesso.' });
-    } catch (err) {
-        global.isConnecting = false;
-        logger.error('❌ Erro ao conectar ao WhatsApp:', err);
-        res.status(500).json({ error: 'Falha ao conectar ao WhatsApp.' });
-    }
-});
-
-// --- Novo Endpoint /api/whatsapp/restart (Limpeza + Reconexão Total) ---
-app.post('/api/whatsapp/restart', requireAuth, async (req, res) => {
-    const fs = require('fs').promises;
-    const path = require('path');
-    
-    try {
-        logger.info('🔄 [RESTART V2] Solicitada limpeza + reinício completo da conexão WhatsApp...');
-
-        // --- 1️⃣ Buscar número atualizado ---
-        let newPhone = null;
-        try {
-            const axios = require('axios');
-            const response = await axios.get('https://devdashboard.menuolika.com.br/api/whatsapp/settings');
-            newPhone = response?.data?.whatsapp_phone || process.env.WHATSAPP_PHONE;
-            logger.info(`📱 Número obtido do backend Laravel: ${newPhone}`);
-        } catch (err) {
-            newPhone = process.env.WHATSAPP_PHONE;
-            logger.warn(`⚠️ Falha ao obter número via API Laravel, usando fallback: ${newPhone}`);
-        }
-
-        if (!newPhone) {
-            return res.status(400).json({ error: 'Número WhatsApp não encontrado.' });
-        }
-
-        global.currentWhatsAppPhone = newPhone;
-        logger.info(`💾 Número WhatsApp atualizado globalmente: ${global.currentWhatsAppPhone}`);
-
-        // --- 2️⃣ Limpeza dos arquivos de sessão no disco ---
-        const SESSION_BASE_DIR = path.resolve(process.cwd(), 'auth_info_baileys');
-        const SESSION_PATH = path.resolve(SESSION_BASE_DIR, newPhone);
-
-        try {
-            const files = await fs.readdir(SESSION_PATH).catch(() => []);
-            let deletedCount = 0;
-            for (const file of files) {
-                const filePath = path.join(SESSION_PATH, file);
-                await fs.unlink(filePath).catch(() => {});
-                deletedCount++;
-            }
-            logger.info(`🗑️ ${deletedCount} arquivo(s) de sessão removido(s) para ${newPhone}.`);
-        } catch (error) {
-            logger.warn('⚠️ Erro ao limpar credenciais no disco:', error.message);
-        }
-
-        // --- 3️⃣ Limpeza das variáveis globais ---
-        global.sock = null;
-        global.isWhatsAppConnected = false;
-        global.whatsappUser = null;
-        global.currentQR = null;
-        global.currentQRTimestamp = null;
-        global.currentPairingCode = null;
-        logger.info('✅ Estado global de conexão resetado.');
-
-        // --- 4️⃣ Reconexão ---
-        try {
-            logger.info(`🚀 Iniciando reconexão limpa para o número: ${newPhone}`);
-            startSock(newPhone).catch(err => {
-                logger.error(`❌ Erro ao reconectar com ${newPhone}: ${err.message}`);
-            });
-        } catch (err) {
-            logger.error('Erro ao iniciar reconexão:', err.message);
-            return res.status(500).json({
-                success: false,
-                error: 'Falha ao reiniciar a conexão WhatsApp.'
-            });
-        }
-
-        // --- 5️⃣ Retorno da API ---
-        res.json({
-            success: true,
-            message: `Sessão limpa e reiniciada para o número: ${newPhone}. Novo código de pareamento será gerado.`,
-            new_phone: newPhone
+        res.json({ 
+            success: true, 
+            message: `Conexão iniciada para o número: ${phone}. Verifique os logs para o código de pareamento.` 
         });
     } catch (error) {
-        logger.error('Erro inesperado no endpoint /api/whatsapp/restart:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Erro interno ao reiniciar conexão WhatsApp.'
-        });
+        logger.error('Erro na rota /connect:', error.message);
+        res.status(500).json({ error: 'Falha ao iniciar a conexão.' });
     }
 });
+
 
 // Enviar mensagem manualmente
 app.post('/api/whatsapp/send', requireAuth, async (req, res) => {
@@ -427,15 +319,15 @@ app.post('/send-message', requireAuth, async (req, res) => {
     }
 });
 
-// 🚨 NOVA ROTA: RESET MANUAL (ADICIONE ISTO)
+// --- Rota de Reset Manual (POST /restart) ---
+// O "Botão de Pânico" que executa o forceLogout para limpeza e Standby
 app.post('/api/whatsapp/restart', requireAuth, async (req, res) => {
     try {
-        logger.warn('🔄 Reset manual solicitado via API');
-        const result = await forceLogout();
+        const result = await forceLogout(); // Esta é a nova função
         res.json(result);
-    } catch (err) {
-        logger.error('Erro no restart:', err);
-        res.status(500).json({ error: 'Falha ao resetar' });
+    } catch (error) {
+        logger.error('Erro na rota /restart:', error.message);
+        res.status(500).json({ error: 'Falha ao forçar o logout da sessão.' });
     }
 });
 
