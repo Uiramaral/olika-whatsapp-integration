@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { startSock, sendMessage, isConnected, restartWhatsAppConnection } = require('./services/socket');
+const { startSock, sendMessage, isConnected, restartWhatsAppConnection, forceLogout } = require('./services/socket');
 const logger = require('./config/logger');
 
 const app = express();
@@ -424,6 +424,18 @@ app.post('/send-message', requireAuth, async (req, res) => {
     } catch (error) {
         logger.error(`❌ Erro no envio: ${error.message}`);
         res.status(500).json({ error: error.message });
+    }
+});
+
+// 🚨 NOVA ROTA: RESET MANUAL (ADICIONE ISTO)
+app.post('/api/whatsapp/restart', requireAuth, async (req, res) => {
+    try {
+        logger.warn('🔄 Reset manual solicitado via API');
+        const result = await forceLogout();
+        res.json(result);
+    } catch (err) {
+        logger.error('Erro no restart:', err);
+        res.status(500).json({ error: 'Falha ao resetar' });
     }
 });
 
