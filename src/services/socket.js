@@ -40,7 +40,9 @@ const saveConfig = (phone) => {
 
 // --- Função Core: Start do Socket ---
 const startSock = async (phoneOverride = null) => {
-  const phoneToUse = phoneOverride || loadConfig() || process.env.WHATSAPP_PHONE;
+  // ⚠️ ALTERAÇÃO: Removemos process.env.WHATSAPP_PHONE daqui
+  // Assim, se não tiver arquivo de config ou phoneOverride, ele é NULL.
+  const phoneToUse = phoneOverride || loadConfig(); 
 
   if (!phoneToUse) {
     console.log("⚠️ MODO STANDBY: Nenhum número configurado. Aguardando POST /connect.");
@@ -185,7 +187,14 @@ const forceLogout = async () => {
   return { success: true, message: "Sessão resetada. Chame /connect para novo pareamento." };
 };
 
-(async () => { await startSock(); })();
+// Start automático no carregamento do módulo.
+// Se não houver configuração salva, entrará em STANDBY.
+(async () => { 
+    // Usamos um setTimeout para garantir que a porta HTTP está rodando primeiro.
+    setTimeout(async () => {
+        await startSock(); 
+    }, 500); 
+})();
 
 // --- Exportações (CRUCIAL) ---
 const sendMessage = async (phone, message) => {
