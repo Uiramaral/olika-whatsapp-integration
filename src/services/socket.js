@@ -23,6 +23,10 @@ let globalSock = null;
 let isSocketConnected = false;
 let currentPhone = null;
 
+// 🚨 NOVO: Contador de falhas e limite
+let consecutiveFailures = 0;
+const MAX_FAILURES = 3; 
+
 // --- Persistência de Configuração ---
 const loadConfig = () => {
   try {
@@ -38,7 +42,6 @@ const saveConfig = (phone) => {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify({ phone }));
 };
 
-// 🚨 NOVO: Remove a configuração de número (Força o Standby)
 const removeConfig = () => {
     if (fs.existsSync(CONFIG_FILE)) {
         fs.unlinkSync(CONFIG_FILE);
@@ -46,10 +49,10 @@ const removeConfig = () => {
     }
 };
 
+
 // --- Função Core: Start do Socket ---
 const startSock = async (phoneOverride = null) => {
-  // ⚠️ AJUSTE: Removemos o fallback para process.env.WHATSAPP_PHONE
-  const phoneToUse = phoneOverride || loadConfig();
+  const phoneToUse = phoneOverride || loadConfig(); // Sem fallback para .env
 
   if (!phoneToUse) {
     console.log("⚠️ MODO STANDBY: Nenhum número configurado. Aguardando POST /connect.");
@@ -91,7 +94,7 @@ const startSock = async (phoneOverride = null) => {
 
   // Geração do Código de Pareamento
   if (!sock.authState.creds.registered) {
-    console.log("⏳ Aguardando (7s) para pedir código...");
+    console.log("⏳ Aguardando (15s) para pedir código...");
     setTimeout(async () => {
       try {
         const code = await sock.requestPairingCode(currentPhone.replace(/\D/g, ""));
@@ -102,7 +105,7 @@ const startSock = async (phoneOverride = null) => {
       } catch (err) { 
         console.error("❌ Erro ao pedir código:", err.message); 
       }
-    }, 7000); 
+    }, 15000); 
   }
 
   // Monitoramento de Conexão
@@ -113,36 +116,51 @@ const startSock = async (phoneOverride = null) => {
       console.log(`✅ ${currentPhone} CONECTADO!`);
       globalSock = sock;
       isSocketConnected = true;
-      global.currentPairingCode = null; 
+      global.currentPairingCode = null;
+      consecutiveFailures = 0; // 👈 ZERA O CONTADOR DE SUCESSO
+      
       axios.post(WEBHOOK_URL, { type: 'connection_update', instance_phone: currentPhone, status: 'CONNECTED' }).catch(() => {});
     }
 
     if (connection === "close") {
       isSocketConnected = false;
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      console.log(`🔴 Desconectado (${reason}). Analisando...`);
+      
+      consecutiveFailures++; // 👈 INCREMENTA A FALHA
+      console.log(`🔴 Desconectado (${reason}). Tentativa ${consecutiveFailures}/${MAX_FAILURES}.`);
 
+      // 🔔 Webhook de Status
       axios.post(WEBHOOK_URL, { type: 'connection_update', instance_phone: currentPhone, status: 'DISCONNECTED' }).catch(() => {});
 
-      // 🚨 MODO STANDBY: Se for LOGGED OUT (401), LIMPA TUDO E PARA!
-      if (reason === DisconnectReason.loggedOut || reason === 401) {
-        console.error("🚫 LOGOUT FATAL: Sessão inválida/removida. Entrando em modo STANDBY...");
+
+      // 🚨 NÍVEL 2/3: LOGOUT FATAL OU LIMITE DE FALHAS EXCEDIDO
+      if (reason === DisconnectReason.loggedOut || consecutiveFailures >= MAX_FAILURES) {
         
-        // 1. Limpa arquivos de sessão
+        console.error("🚫 LIMITE DE FALHAS ATINGIDO ou LOGOUT FATAL. Entrando em modo STANDBY...");
+        
+        // 1. Notifica o Laravel para exibir o erro ao usuário
+        axios.post(WEBHOOK_URL, { 
+            type: 'shutdown_alert', 
+            instance_phone: currentPhone, 
+            reason: 'PERSISTENT_FAILURE' 
+        }).catch(() => {});
+
+        // 2. Limpeza de arquivos de sessão
         const sessionPath = path.join(BASE_AUTH_DIR, currentPhone);
         if (fs.existsSync(sessionPath)) {
             fs.rmSync(sessionPath, { recursive: true, force: true });
         }
         
-        // 2. Limpa a configuração de número (FORÇA o Standby no próximo restart)
+        // 3. Limpa a configuração de número (FORÇA o Standby)
         removeConfig();
         
-        // 3. Desativa o socket global e espera por nova ordem
+        // 4. Desativa o socket global
         globalSock = null;
         global.currentPairingCode = null;
+        consecutiveFailures = 0; // Zera para a próxima tentativa
         
       } else {
-        // Outros erros (network, 500, etc.) -> Reconecta
+        // NÍVEL 1: Falha Transitória (Tenta reconectar)
         console.log("🔄 Queda temporária. Tentando reconectar...");
         startSock();
       }
@@ -189,7 +207,7 @@ const forceLogout = async () => {
 
   removeConfig(); // APAGA A CONFIG DE NÚMERO
   
-  // Não chama startSock() aqui, deixa o sistema em STANDBY (Pronto)
+  // Não chama startSock() aqui, deixa o sistema em STANDBY
   return { success: true, message: "Sessão resetada. Chame /connect para novo pareamento." };
 };
 
