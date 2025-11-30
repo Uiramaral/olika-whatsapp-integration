@@ -10,13 +10,14 @@ const { Boom } = require("@hapi/boom");
 const fs = require("fs");
 const path = require("path");
 const axios = require('axios');
-const NodeCache = require("node-cache"); // Certifique-se que instalou: npm install node-cache
+const NodeCache = require("node-cache");
 
 // Configurações
 const BASE_AUTH_DIR = path.resolve(__dirname, "..", "..", "auth_info_baileys");
 const CONFIG_FILE = path.join(BASE_AUTH_DIR, "session_config.json");
 const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://devdashboard.menuolika.com.br/api/whatsapp/webhook";
 
+// Cache para retry
 const msgRetryCounterCache = new NodeCache();
 
 let globalSock = null;
@@ -38,6 +39,19 @@ const saveConfig = (phone) => {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify({ phone }));
 };
 
+// --- Função de Limpeza de Sessão ---
+const clearSession = (sessionPath) => {
+  console.warn(`🗑️ LIMPANDO SESSÃO EM: ${sessionPath}`);
+  try {
+    if (fs.existsSync(sessionPath)) {
+      fs.rmSync(sessionPath, { recursive: true, force: true });
+      console.log("✅ Pasta removida. O próximo start será limpo.");
+    }
+  } catch (e) {
+    console.error("❌ Erro ao limpar sessão:", e.message);
+  }
+};
+
 // --- Socket Logic ---
 const startSock = async (phoneOverride = null) => {
   const phoneToUse = phoneOverride || loadConfig() || process.env.WHATSAPP_PHONE;
@@ -47,21 +61,24 @@ const startSock = async (phoneOverride = null) => {
     return null;
   }
 
+  // Salva configuração se mudou
   if (currentPhone !== phoneToUse) {
     currentPhone = phoneToUse;
     saveConfig(currentPhone);
   }
 
   const sessionPath = path.join(BASE_AUTH_DIR, currentPhone);
+  
+  // Garante a pasta
   if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
 
   const { version } = await fetchLatestBaileysVersion();
   const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
-  // Limpa socket anterior
+  // Fecha socket anterior
   if (globalSock) { try { globalSock.end(); } catch {} }
 
-  console.log(`🚀 Iniciando para: ${currentPhone} (v${version.join(".")})`);
+  console.log(`🚀 Iniciando Socket para: ${currentPhone} (v${version.join(".")})`);
 
   const sock = makeWASocket({
     version,
@@ -71,18 +88,21 @@ const startSock = async (phoneOverride = null) => {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, P({ level: "silent" })),
     },
-    // VOLTAMOS AO PADRÃO UBUNTU (Mais estável que o personalizado)
+    // Navegador Ubuntu (Mais estável que 'Olika Gateway')
     browser: ["Ubuntu", "Chrome", "20.0.04"], 
     markOnlineOnConnect: true,
     generateHighQualityLinkPreview: true,
     syncFullHistory: false,
     msgRetryCounterCache,
     connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000, // Aumentado para evitar timeouts
   });
 
   // Pairing Code Logic
   if (!sock.authState.creds.registered) {
-    console.log("⏳ Gerando código de pareamento...");
+    console.log("⏳ Preparando solicitação de código (Aguardando 7s)...");
+    
+    // Aumentei delay para 7s para evitar 'Connection Closed' prematuro
     setTimeout(async () => {
       try {
         const code = await sock.requestPairingCode(currentPhone.replace(/\D/g, ""));
@@ -90,15 +110,17 @@ const startSock = async (phoneOverride = null) => {
         console.log(`📠 CÓDIGO (${currentPhone}): ${code?.match(/.{1,4}/g)?.join("-")}`);
         console.log(`#################################################\n`);
         global.currentPairingCode = code;
-      } catch (err) { console.error("Erro pairing:", err.message); }
-    }, 6000); 
+      } catch (err) { 
+        console.error("❌ Erro ao pedir código:", err.message); 
+      }
+    }, 7000); 
   }
 
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect } = update;
 
     if (connection === "open") {
-      console.log(`✅ ${currentPhone} CONECTADO COM SUCESSO!`);
+      console.log(`✅ ${currentPhone} CONECTADO E PRONTO!`);
       globalSock = sock;
       isSocketConnected = true;
     }
@@ -109,22 +131,19 @@ const startSock = async (phoneOverride = null) => {
       
       console.log(`🔴 Desconectado. Motivo: ${reason}`);
 
-      // LÓGICA CORRIGIDA:
-      // Se for 401 (Logged Out), PRECISAMOS limpar, senão entra em loop.
+      // LÓGICA DE AUTO-CORREÇÃO (CRUCIAL)
       if (reason === DisconnectReason.loggedOut) {
-        console.error("🚫 Credenciais inválidas (401). Limpando sessão e reiniciando...");
-        try {
-            // Pequeno delay para liberar arquivos presos
-            await new Promise(r => setTimeout(r, 1000));
-            fs.rmSync(sessionPath, { recursive: true, force: true });
-            console.log("🗑️ Sessão limpa. Pronto para novo pareamento.");
-        } catch (e) {
-            console.error("Erro ao limpar sessão:", e);
-        }
-        startSock(); // Reinicia limpo
+        console.error("🚫 ERRO 401: Sessão corrompida ou desconectada pelo celular.");
+        console.error("🧹 Executando limpeza automática para permitir novo pareamento...");
+        
+        sock.end(); // Encerra conexões pendentes
+        clearSession(sessionPath); // Apaga a pasta
+        
+        console.log("🔄 Reiniciando processo do zero...");
+        setTimeout(() => startSock(), 2000); // Reinicia
       } else {
-        // Outros erros (conexão caiu): Reconecta sem limpar
-        console.log("🔄 Reconectando...");
+        // Outros erros (queda de net) -> Reconecta sem limpar
+        console.log("🔄 Tentando reconectar (mantendo sessão)...");
         startSock();
       }
     }
@@ -149,6 +168,7 @@ const startSock = async (phoneOverride = null) => {
   return sock;
 };
 
+// Start automático
 (async () => { await startSock(); })();
 
 const sendMessage = async (phone, message) => {
