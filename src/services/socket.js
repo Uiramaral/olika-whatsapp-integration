@@ -10,14 +10,13 @@ const { Boom } = require("@hapi/boom");
 const fs = require("fs");
 const path = require("path");
 const axios = require('axios');
-const NodeCache = require("node-cache");
+const NodeCache = require("node-cache"); // Certifique-se que instalou: npm install node-cache
 
-// Caminhos
+// Configurações
 const BASE_AUTH_DIR = path.resolve(__dirname, "..", "..", "auth_info_baileys");
 const CONFIG_FILE = path.join(BASE_AUTH_DIR, "session_config.json");
 const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://devdashboard.menuolika.com.br/api/whatsapp/webhook";
 
-// Cache para retry de mensagens
 const msgRetryCounterCache = new NodeCache();
 
 let globalSock = null;
@@ -66,17 +65,17 @@ const startSock = async (phoneOverride = null) => {
 
   const sock = makeWASocket({
     version,
-    logger: P({ level: "silent" }), // Logs limpos
+    logger: P({ level: "silent" }),
     printQRInTerminal: false,
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, P({ level: "silent" })),
     },
-    // Mudança importante: Navegador genérico para evitar bloqueio
-    browser: ["Olika Gateway", "Chrome", "120.0.0"], 
+    // VOLTAMOS AO PADRÃO UBUNTU (Mais estável que o personalizado)
+    browser: ["Ubuntu", "Chrome", "20.0.04"], 
     markOnlineOnConnect: true,
     generateHighQualityLinkPreview: true,
-    syncFullHistory: false, // Acelera a conexão inicial
+    syncFullHistory: false,
     msgRetryCounterCache,
     connectTimeoutMs: 60000,
   });
@@ -92,7 +91,7 @@ const startSock = async (phoneOverride = null) => {
         console.log(`#################################################\n`);
         global.currentPairingCode = code;
       } catch (err) { console.error("Erro pairing:", err.message); }
-    }, 5000); // Aumentei para 5s para dar tempo do socket estabilizar
+    }, 6000); 
   }
 
   sock.ev.on("connection.update", async (update) => {
@@ -110,15 +109,21 @@ const startSock = async (phoneOverride = null) => {
       
       console.log(`🔴 Desconectado. Motivo: ${reason}`);
 
+      // LÓGICA CORRIGIDA:
+      // Se for 401 (Logged Out), PRECISAMOS limpar, senão entra em loop.
       if (reason === DisconnectReason.loggedOut) {
-        // ⚠️ MUDANÇA CRÍTICA: NÃO APAGA MAIS AUTOMATICAMENTE
-        // Isso evita que o bot apague a sessão durante uma falha de pareamento.
-        console.error("🚫 Erro 401 (Logged Out). Tentando reconectar sem limpar sessão...");
-        console.error("💡 Dica: Se entrar em loop infinito, use o endpoint /restart para limpar manualmente.");
-        
-        // fs.rmSync(sessionPath, { recursive: true, force: true }); // <--- LINHA COMENTADA
-        startSock(); 
+        console.error("🚫 Credenciais inválidas (401). Limpando sessão e reiniciando...");
+        try {
+            // Pequeno delay para liberar arquivos presos
+            await new Promise(r => setTimeout(r, 1000));
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+            console.log("🗑️ Sessão limpa. Pronto para novo pareamento.");
+        } catch (e) {
+            console.error("Erro ao limpar sessão:", e);
+        }
+        startSock(); // Reinicia limpo
       } else {
+        // Outros erros (conexão caiu): Reconecta sem limpar
         console.log("🔄 Reconectando...");
         startSock();
       }
