@@ -106,10 +106,31 @@ const startSock = async (phoneOverride = null) => {
     if (connection === "close") {
       isSocketConnected = false;
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      console.log(`🔴 Desconectado (${reason}). Tentando reconectar...`);
-      // Não limpamos automaticamente aqui para evitar loop em falhas de rede
-      // A limpeza deve ser manual via /restart se der erro persistente
-      startSock(); 
+      
+      console.log(`🔴 Desconectado (${reason}). Analisando...`);
+
+      // 🚨 VOLTAMOS COM A LIMPEZA AUTOMÁTICA (Agora é seguro com browser Ubuntu)
+      if (reason === DisconnectReason.loggedOut) {
+        console.warn("🚫 Dispositivo desconectado pelo celular (401). Limpando sessão...");
+        
+        // Encerra socket atual para liberar arquivos
+        if (globalSock) { try { globalSock.end(); } catch {} }
+        
+        // Apaga a pasta da sessão
+        const sessionPath = path.join(BASE_AUTH_DIR, currentPhone);
+        if (fs.existsSync(sessionPath)) {
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+            console.log("🗑️ Sessão inválida removida.");
+        }
+        
+        // Reinicia do zero para gerar novo código
+        setTimeout(() => startSock(), 1000);
+        
+      } else {
+        // Outros erros (queda de internet, 500, 515) -> SÓ RECONECTA
+        console.log("🔄 Queda temporária. Reconectando...");
+        startSock();
+      }
     }
   });
 
