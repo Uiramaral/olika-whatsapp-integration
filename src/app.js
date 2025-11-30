@@ -68,9 +68,10 @@ app.get('/', (req, res) => {
 // Permite que o Dashboard (Laravel) leia o status
 app.get('/api/whatsapp/status', requireAuth, (req, res) => {
     res.json({
-        isConnected: isConnected(), // Retorna true ou false
-        pairingCode: global.currentPairingCode || null, // Retorna o código se estiver esperando pareamento
-        currentPhone: getCurrentPhone() || null, // Retorna o número que está ativo/configurado
+        connected: isConnected(), // Mantido para compatibilidade com Laravel
+        isConnected: isConnected(), // Novo padrão
+        pairingCode: global.currentPairingCode || null, 
+        currentPhone: getCurrentPhone() || null, 
         message: isConnected() ? 'Conectado e Operacional' : (global.currentPairingCode ? 'Aguardando Pareamento' : 'Em Standby (Offline)')
     });
 });
