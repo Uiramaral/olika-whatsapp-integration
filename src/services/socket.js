@@ -23,7 +23,7 @@ let globalSock = null;
 let isSocketConnected = false;
 let currentPhone = null;
 
-// --- Helpers de Persistência ---
+// --- Persistência de Configuração ---
 const loadConfig = () => {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
@@ -38,17 +38,24 @@ const saveConfig = (phone) => {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify({ phone }));
 };
 
+// 🚨 NOVO: Remove a configuração de número (Força o Standby)
+const removeConfig = () => {
+    if (fs.existsSync(CONFIG_FILE)) {
+        fs.unlinkSync(CONFIG_FILE);
+        console.log("🗑️ Configuração de número removida. STANDBY ATIVO.");
+    }
+};
+
 // --- Função Core: Start do Socket ---
 const startSock = async (phoneOverride = null) => {
-  // ⚠️ ALTERAÇÃO: Removemos process.env.WHATSAPP_PHONE daqui
-  // Assim, se não tiver arquivo de config ou phoneOverride, ele é NULL.
-  const phoneToUse = phoneOverride || loadConfig(); 
+  // ⚠️ AJUSTE: Removemos o fallback para process.env.WHATSAPP_PHONE
+  const phoneToUse = phoneOverride || loadConfig();
 
   if (!phoneToUse) {
     console.log("⚠️ MODO STANDBY: Nenhum número configurado. Aguardando POST /connect.");
     globalSock = null;
     isSocketConnected = false;
-    currentPhone = null; // Garante que o estado seja limpo
+    currentPhone = null;
     return null;
   }
 
@@ -106,9 +113,7 @@ const startSock = async (phoneOverride = null) => {
       console.log(`✅ ${currentPhone} CONECTADO!`);
       globalSock = sock;
       isSocketConnected = true;
-      global.currentPairingCode = null;
-      
-      // 🔔 Webhook de Status (Notifica o Laravel)
+      global.currentPairingCode = null; 
       axios.post(WEBHOOK_URL, { type: 'connection_update', instance_phone: currentPhone, status: 'CONNECTED' }).catch(() => {});
     }
 
@@ -117,22 +122,22 @@ const startSock = async (phoneOverride = null) => {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       console.log(`🔴 Desconectado (${reason}). Analisando...`);
 
-      // 🔔 Webhook de Status (Notifica o Laravel)
       axios.post(WEBHOOK_URL, { type: 'connection_update', instance_phone: currentPhone, status: 'DISCONNECTED' }).catch(() => {});
 
-
-      // 🚨 MODO STANDBY: Se for LOGGED OUT (401), LIMPA E PARAR DE TENTAR
+      // 🚨 MODO STANDBY: Se for LOGGED OUT (401), LIMPA TUDO E PARA!
       if (reason === DisconnectReason.loggedOut || reason === 401) {
         console.error("🚫 LOGOUT FATAL: Sessão inválida/removida. Entrando em modo STANDBY...");
         
-        // 1. Limpeza de arquivos
+        // 1. Limpa arquivos de sessão
         const sessionPath = path.join(BASE_AUTH_DIR, currentPhone);
         if (fs.existsSync(sessionPath)) {
             fs.rmSync(sessionPath, { recursive: true, force: true });
-            console.log("🗑️ Sessão removida. Aguardando /connect.");
         }
         
-        // 2. Desativa o socket global
+        // 2. Limpa a configuração de número (FORÇA o Standby no próximo restart)
+        removeConfig();
+        
+        // 3. Desativa o socket global e espera por nova ordem
         globalSock = null;
         global.currentPairingCode = null;
         
@@ -164,7 +169,7 @@ const startSock = async (phoneOverride = null) => {
   return sock;
 };
 
-// --- Funções de Controle ---
+// --- Funções de Controle Exportadas ---
 const forceLogout = async () => {
   console.log("🚨 RESET MANUAL INICIADO!");
   
@@ -177,26 +182,25 @@ const forceLogout = async () => {
   const phone = currentPhone || loadConfig();
   if (phone) {
     const sessionPath = path.join(BASE_AUTH_DIR, phone);
-    console.warn(`🗑️ APAGANDO: ${sessionPath}`);
     if (fs.existsSync(sessionPath)) {
       fs.rmSync(sessionPath, { recursive: true, force: true });
     }
   }
 
-  // Não chama startSock() aqui, deixa o sistema em STANDBY
+  removeConfig(); // APAGA A CONFIG DE NÚMERO
+  
+  // Não chama startSock() aqui, deixa o sistema em STANDBY (Pronto)
   return { success: true, message: "Sessão resetada. Chame /connect para novo pareamento." };
 };
 
-// Start automático no carregamento do módulo.
-// Se não houver configuração salva, entrará em STANDBY.
+// Inicialização: Tenta startar, se não tiver config, entra em STANDBY
 (async () => { 
-    // Usamos um setTimeout para garantir que a porta HTTP está rodando primeiro.
     setTimeout(async () => {
         await startSock(); 
     }, 500); 
 })();
 
-// --- Exportações (CRUCIAL) ---
+// --- Exportações ---
 const sendMessage = async (phone, message) => {
     if (!globalSock || !isSocketConnected) throw new Error("Offline");
     const cleanPhone = phone.replace(/\D/g, "");
