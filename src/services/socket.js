@@ -101,6 +101,13 @@ const startSock = async (phoneOverride = null) => {
       console.log(`✅ ${currentPhone} CONECTADO!`);
       globalSock = sock;
       isSocketConnected = true;
+
+      // 🔔 NOVO: Avisa o Laravel que CONECTOU
+      axios.post(WEBHOOK_URL, {
+        type: 'connection_update', // Identificador do evento
+        instance_phone: currentPhone,
+        status: 'CONNECTED'
+      }).catch(err => console.error("⚠️ Falha ao avisar Laravel (Conectado):", err.message));
     }
 
     if (connection === "close") {
@@ -108,6 +115,13 @@ const startSock = async (phoneOverride = null) => {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       
       console.log(`🔴 Desconectado (${reason}). Analisando...`);
+
+      // 🔔 NOVO: Avisa o Laravel que CAIU
+      axios.post(WEBHOOK_URL, {
+        type: 'connection_update',
+        instance_phone: currentPhone,
+        status: 'DISCONNECTED'
+      }).catch(() => {}); // Ignora erro de webhook na desconexão
 
       // 🚨 VOLTAMOS COM A LIMPEZA AUTOMÁTICA (Agora é seguro com browser Ubuntu)
       if (reason === DisconnectReason.loggedOut) {
