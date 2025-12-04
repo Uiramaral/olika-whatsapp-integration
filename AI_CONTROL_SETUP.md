@@ -22,6 +22,8 @@ Adicione as seguintes variáveis de ambiente no Railway (ou seu ambiente de prod
 | `OPENAI_API_KEY` | Chave da API da OpenAI para processamento de IA e transcrição Whisper | `sk-...` |
 | `OPENAI_MODEL` | Modelo da OpenAI a ser usado (padrão: `gpt-5-nano`) | `gpt-5-nano` (recomendado) ou `gpt-4o-mini` |
 | `OPENAI_TIMEOUT` | Timeout em segundos para chamadas da OpenAI (padrão: `30`) | `30` |
+| `AI_SYSTEM_PROMPT` | Script de personalidade da IA (persona) | Texto longo com instruções (opcional) |
+| `CUSTOMER_CONTEXT_URL` | Endpoint para buscar contexto dinâmico do cliente | `https://devdashboard.menuolika.com.br/api/customer-context` |
 
 ### Exemplo de Configuração no Railway
 
@@ -31,6 +33,12 @@ WH_API_TOKEN=seu_token_secreto_aqui
 OPENAI_API_KEY=sk-sua_chave_openai_aqui
 OPENAI_MODEL=gpt-5-nano
 OPENAI_TIMEOUT=30
+
+# Contexto Estático (Persona da IA) - Opcional
+AI_SYSTEM_PROMPT="Você é o Oli, assistente virtual da Olika Pizza..."
+
+# Contexto Dinâmico (Dados do Cliente) - Opcional
+CUSTOMER_CONTEXT_URL=https://devdashboard.menuolika.com.br/api/customer-context
 ```
 
 ## 🔌 Contrato da API no Laravel

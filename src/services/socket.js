@@ -27,8 +27,14 @@ const WH_API_TOKEN = process.env.WH_API_TOKEN;
 const STATUS_CACHE_TTL = 30; // 🚨 NOVO: Cache de 30 segundos
 
 // 🤖 Configurações da OpenAI
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5-nano'; // Modelo de custo otimizado 
-const OPENAI_TIMEOUT = parseInt(process.env.OPENAI_TIMEOUT) * 1000 || 30000; 
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5-nano'; // Modelo de custo otimizado
+const OPENAI_TIMEOUT = parseInt(process.env.OPENAI_TIMEOUT) * 1000 || 30000;
+
+// 🎭 Contexto Estático (Persona da IA)
+const AI_SYSTEM_PROMPT = process.env.AI_SYSTEM_PROMPT || "Você é um assistente profissional da Olika, otimizado para custo. Sua análise é baseada APENAS no texto que você recebe. Se houver mídia que não pôde ser processada, avise o usuário educadamente.";
+
+// 📋 Contexto Dinâmico (URL para buscar dados do cliente)
+const CUSTOMER_CONTEXT_URL = process.env.CUSTOMER_CONTEXT_URL;
 
 // Inicialização da OpenAI (para o GPT-5-nano ou modelo configurado)
 const openai = new OpenAI({ 
@@ -65,6 +71,64 @@ const removeConfig = () => {
     if (fs.existsSync(CONFIG_FILE)) {
         fs.unlinkSync(CONFIG_FILE);
         console.log("🗑️ Configuração de número removida. STANDBY ATIVO.");
+    }
+};
+
+/**
+ * Busca contexto dinâmico do cliente no Laravel para injeção no prompt
+ * @param {string} phoneNumber - Número de telefone do cliente (apenas dígitos)
+ * @returns {Promise<string>} String formatada com contexto do cliente ou string vazia
+ */
+const getCustomerContext = async (phoneNumber) => {
+    if (!CUSTOMER_CONTEXT_URL || !WH_API_TOKEN) {
+        logger.warn("❌ CUSTOMER_CONTEXT_URL não configurada. Contexto dinâmico desabilitado.");
+        return "";
+    }
+
+    try {
+        const response = await axios.post(CUSTOMER_CONTEXT_URL, {
+            phone: phoneNumber
+        }, {
+            headers: {
+                'X-API-Token': WH_API_TOKEN,
+                'Content-Type': 'application/json'
+            },
+            timeout: 3000 // Timeout mais curto para não atrasar a resposta
+        });
+
+        const context = response.data;
+        
+        // Se não houver cliente, retornar vazio
+        if (!context.has_customer) {
+            return "";
+        }
+
+        // Formatar contexto de forma concisa
+        let contextString = `[CONTEXTO DO CLIENTE: Nome: ${context.name || 'Cliente'}`;
+        
+        if (context.last_order) {
+            contextString += `, Último Pedido: #${context.last_order}`;
+            if (context.last_order_status) {
+                contextString += ` (Status: ${context.last_order_status})`;
+            }
+        }
+        
+        if (context.total_orders > 0) {
+            contextString += `, Total de Pedidos: ${context.total_orders}`;
+        }
+        
+        if (context.loyalty_points !== null && context.loyalty_points > 0) {
+            contextString += `, Pontos de Fidelidade: ${context.loyalty_points}`;
+        }
+        
+        contextString += "]";
+        
+        return contextString;
+        
+    } catch (error) {
+        logger.error(`❌ Falha ao buscar contexto do cliente no Laravel: ${error.message}`);
+        // Em caso de falha, continuar sem contexto (não bloquear a IA)
+        return "";
     }
 };
 
@@ -280,12 +344,22 @@ const startSock = async (phoneOverride = null) => {
         // Extrai dados e processa áudio/pdf (chamada condicional a Whisper)
         const { payload } = await extractDataForAI(incomingMessage);
         
-        // CONSTRUÇÃO DA PROMPT (Comportamento da IA)
-        const systemPrompt = "Você é um assistente profissional da Olika, otimizado para custo. Sua análise é baseada APENAS no texto que você recebe. Se houver mídia que não pôde ser processada, avise o usuário educadamente.";
+        // 🎭 CONTEXTO ESTÁTICO: Persona da IA (da variável de ambiente)
+        const systemPrompt = AI_SYSTEM_PROMPT;
+        
+        // 📋 CONTEXTO DINÂMICO: Busca dados do cliente no Laravel
+        const phoneNumber = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
+        const dynamicContext = await getCustomerContext(phoneNumber);
+        
+        // Construir prompt do usuário com contexto dinâmico
+        let finalUserPrompt = payload;
+        if (dynamicContext) {
+            finalUserPrompt = `${dynamicContext}\n\n[Mensagem do Usuário]: ${payload}`;
+        }
         
         const contentForAI = [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: payload } // O texto final a ser analisado
+            { role: 'system', content: systemPrompt }, // Persona da IA
+            { role: 'user', content: finalUserPrompt } // Contexto + Mensagem do usuário
         ];
         
         // 3. CHAMADA FINAL PARA O GPT (modelo configurado)
