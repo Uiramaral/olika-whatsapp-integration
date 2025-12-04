@@ -11,11 +11,30 @@ const fs = require("fs");
 const path = require("path");
 const axios = require('axios');
 const NodeCache = require("node-cache");
+const logger = require('../config/logger');
+const { OpenAI } = require('openai');
+const { extractDataForAI } = require('../utils/ai_processor');
+const { getContentType } = require('@whiskeysockets/baileys');
 
 // Configurações
 const BASE_AUTH_DIR = path.resolve(__dirname, "..", "..", "auth_info_baileys");
 const CONFIG_FILE = path.join(BASE_AUTH_DIR, "session_config.json");
 const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://devdashboard.menuolika.com.br/api/whatsapp/webhook";
+
+// 🚨 Configurações de Controle de IA
+const AI_STATUS_URL = process.env.AI_STATUS_URL;
+const WH_API_TOKEN = process.env.WH_API_TOKEN;
+const STATUS_CACHE_TTL = 30; // 🚨 NOVO: Cache de 30 segundos
+
+// 🤖 Configurações da OpenAI
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5-nano'; // Modelo de custo otimizado 
+const OPENAI_TIMEOUT = parseInt(process.env.OPENAI_TIMEOUT) * 1000 || 30000; 
+
+// Inicialização da OpenAI (para o GPT-5-nano ou modelo configurado)
+const openai = new OpenAI({ 
+    apiKey: process.env.OPENAI_API_KEY,
+    timeout: OPENAI_TIMEOUT
+});
 
 const msgRetryCounterCache = new NodeCache();
 
@@ -49,6 +68,59 @@ const removeConfig = () => {
     }
 };
 
+/**
+ * Consulta o Laravel para verificar se a IA está habilitada (COM CACHE).
+ * @param {string} senderJid - O JID (número) do remetente.
+ * @returns {Promise<boolean>} True se a IA deve responder, False caso contrário.
+ */
+const checkAiStatus = async (senderJid) => {
+    const cacheKey = `ai_status_${senderJid}`;
+    const cachedStatus = msgRetryCounterCache.get(cacheKey);
+
+    // 1. Cache Hit
+    if (cachedStatus !== undefined) {
+        logger.info(`⚡ Cache HIT para status da IA: ${senderJid} -> ${cachedStatus ? 'enabled' : 'disabled'}`);
+        return cachedStatus;
+    }
+
+    if (!AI_STATUS_URL || !WH_API_TOKEN) {
+        logger.warn("❌ Configurações AI_STATUS_URL/WH_API_TOKEN ausentes. IA Desabilitada.");
+        return false; 
+    }
+
+    try {
+        const phoneNumber = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
+
+        // 2. Chamada POST para o Laravel
+        const response = await axios.post(AI_STATUS_URL, {
+            phone: phoneNumber 
+        }, {
+            headers: {
+                'X-API-Token': WH_API_TOKEN,
+                'Content-Type': 'application/json'
+            },
+            timeout: 5000 
+        });
+
+        const isEnabled = response.data.status === 'enabled';
+        
+        // 3. Cache Miss: Salva no cache antes de retornar
+        msgRetryCounterCache.set(cacheKey, isEnabled, STATUS_CACHE_TTL);
+        
+        if (isEnabled) {
+            logger.info(`✅ IA habilitada para ${phoneNumber}`);
+        } else {
+            logger.info(`🚫 IA desabilitada para ${phoneNumber} (${response.data.reason || 'Global_Kill_Switch'})`);
+        }
+        
+        return isEnabled;
+        
+    } catch (error) {
+        logger.error(`❌ Falha na comunicação com o Laravel para status da IA: ${error.message}`);
+        // Política de segurança: Falha na comunicação = IA desligada.
+        return false;
+    }
+};
 
 // --- Função Core: Start do Socket ---
 const startSock = async (phoneOverride = null) => {
@@ -167,18 +239,75 @@ const startSock = async (phoneOverride = null) => {
     }
   });
 
-  // Eventos Mantidos
-  sock.ev.on("messages.upsert", async (m) => {
-    const msg = m.messages[0];
-    if (!msg.key.fromMe && m.type === "notify" && !msg.key.remoteJid.includes("@g.us")) {
-      const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
-      if (text) {
+  // Eventos Mantidos - Orquestração Completa de IA
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+    const incomingMessage = messages[0];
+    
+    // Filtro essencial para não processar status ou mensagens próprias
+    if (incomingMessage.key.fromMe || !incomingMessage.message) return;
+    
+    const senderJid = incomingMessage.key.remoteJid;
+    
+    // 🚨 1. VERIFICAÇÃO DE STATUS (COM CACHE)
+    const aiShouldRespond = await checkAiStatus(senderJid);
+
+    if (!aiShouldRespond) {
+        logger.info(`🚫 IA desabilitada para ${senderJid} (Controlado pelo Laravel). Ignorando.`);
+        // Se a IA está desligada, você pode adicionar um Webhook aqui para logar a mensagem no Laravel ou deixar que um atendente manual trate.
+        // Envia webhook apenas para LOG
+        const text = incomingMessage.message?.conversation || 
+                     incomingMessage.message?.extendedTextMessage?.text || 
+                     '[Mensagem sem texto]';
+        
+        // 💡 Adiciona o tipo de mensagem para o Laravel decidir a ação (ex: transferência humana para imagens/vídeos)
+        const messageType = getContentType(incomingMessage.message) || 'unknown';
+        
+        // Webhook para LOG no Laravel
         axios.post(WEBHOOK_URL, {
-          phone: msg.key.remoteJid.replace("@s.whatsapp.net", ""),
-          instance_phone: currentPhone,
-          message: text
-        }).catch(() => {});
-      }
+            phone: senderJid.replace("@s.whatsapp.net", ""),
+            instance_phone: currentPhone,
+            message: text,
+            ai_disabled: true,
+            message_type: messageType 
+        }).catch((e) => logger.error('❌ Erro ao enviar webhook para Laravel:', e.message)); // Tratamento de erro do webhook
+        return; 
+    }
+    
+    // 2. PROCESSO DE ORQUESTRAÇÃO DE IA
+    logger.info(`✅ IA habilitada para ${senderJid}. Iniciando Orquestração de IA...`);
+    
+    try {
+        // Extrai dados e processa áudio/pdf (chamada condicional a Whisper)
+        const { payload } = await extractDataForAI(incomingMessage);
+        
+        // CONSTRUÇÃO DA PROMPT (Comportamento da IA)
+        const systemPrompt = "Você é um assistente profissional da Olika, otimizado para custo. Sua análise é baseada APENAS no texto que você recebe. Se houver mídia que não pôde ser processada, avise o usuário educadamente.";
+        
+        const contentForAI = [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: payload } // O texto final a ser analisado
+        ];
+        
+        // 3. CHAMADA FINAL PARA O GPT (modelo configurado)
+        const response = await openai.chat.completions.create({
+            model: OPENAI_MODEL,
+            messages: contentForAI,
+        });
+
+        const replyText = response.choices[0].message.content;
+
+        // 4. RESPOSTA AO USUÁRIO (A função sendMessage agora é robusta)
+        await sendMessage(senderJid, replyText);
+        logger.info(`✅ Resposta da IA enviada para ${senderJid}.`);
+
+    } catch (error) {
+        logger.error(`❌ ERRO NO FLUXO DE ORQUESTRAÇÃO: ${error.message}`);
+        try {
+            // A chamada sendMessage é mais robusta, mas ainda pode lançar erro.
+            await sendMessage(senderJid, "Desculpe, a análise de IA falhou. Por favor, tente novamente mais tarde.");
+        } catch (sendError) {
+            logger.error(`❌ Erro ao enviar mensagem de erro: ${sendError.message}`);
+        }
     }
   });
   sock.ev.on("creds.update", saveCreds);
@@ -221,12 +350,23 @@ const forceLogout = async () => {
 // --- Exportações ---
 const sendMessage = async (phone, message) => {
     if (!globalSock || !isSocketConnected) throw new Error("Offline");
-    const cleanPhone = phone.replace(/\D/g, "");
-    const checkJid = cleanPhone.includes("@s.whatsapp.net") ? cleanPhone : `${cleanPhone}@s.whatsapp.net`;
-    const [result] = await globalSock.onWhatsApp(checkJid);
-    if (!result?.exists) throw new Error("Número inválido");
-    const sent = await globalSock.sendMessage(result.jid, { text: message });
-    return { success: true, messageId: sent.key.id };
+    
+    // 🚨 AJUSTE DE ROBUSTEZ: Captura erros de envio
+    try {
+        const cleanPhone = phone.replace(/\D/g, "");
+        const checkJid = cleanPhone.includes("@s.whatsapp.net") ? cleanPhone : `${cleanPhone}@s.whatsapp.net`;
+        const [result] = await globalSock.onWhatsApp(checkJid);
+        
+        if (!result?.exists) throw new Error("Número inválido no WhatsApp");
+        
+        const sent = await globalSock.sendMessage(result.jid, { text: message });
+        
+        return { success: true, messageId: sent.key.id };
+    } catch (e) {
+        // Loga o erro, mas permite que o fluxo externo continue sem quebrar o listener
+        logger.error(`❌ ERRO ao enviar mensagem para ${phone}: ${e.message}`);
+        throw new Error(`Falha no envio da mensagem: ${e.message}`); 
+    }
 };
 const isConnected = () => isSocketConnected;
 const getCurrentPhone = () => currentPhone;

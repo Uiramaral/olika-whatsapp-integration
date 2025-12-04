@@ -344,13 +344,14 @@ app.post('/api/whatsapp/restart', requireAuth, async (req, res) => {
  * 2. Completo: { event, order, customer, phone?, message? }
  */
 app.post('/api/notify', requireAuth, async (req, res) => {
-    // Timeout de segurança: resposta em no máximo 8 segundos
+    // Timeout de segurança: resposta em no máximo 6 segundos (AJUSTADO PARA RAILWAY)
     let responseTimeout = setTimeout(() => {
         if (!res.headersSent) {
             logger.warn('⚠️ Timeout no endpoint /api/notify - resposta tardia', {
                 order_id: req.body?.order?.id,
                 event: req.body?.event,
-                phone: req.body?.phone || req.body?.customer?.phone
+                phone: req.body?.phone || req.body?.customer?.phone,
+                'X-Request-ID': req.headers['x-request-id'] || 'N/A' // 🚨 Rastreamento
             });
             res.status(504).json({
                 success: false,
@@ -359,7 +360,7 @@ app.post('/api/notify', requireAuth, async (req, res) => {
                 timeout: true
             });
         }
-    }, 8000);
+    }, 6000); // 🚨 AJUSTADO PARA 6s
 
     // Função auxiliar para limpar timeout e garantir resposta única
     const clearTimeoutAndRespond = (statusCode, jsonResponse) => {
@@ -440,7 +441,8 @@ app.post('/api/notify', requireAuth, async (req, res) => {
             order_id: order?.id,
             order_number: order?.number,
             phone: targetPhone,
-            message_length: finalMessage.length
+            message_length: finalMessage.length,
+            'X-Request-ID': req.headers['x-request-id'] || 'N/A' // 🚨 Rastreamento
         });
 
         if (!res.headersSent) {
