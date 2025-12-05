@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const axios = require('axios');
 const { startSock, sendMessage, isConnected, forceLogout, getCurrentPhone } = require('./services/socket');
 const logger = require('./config/logger');
 
@@ -13,12 +14,58 @@ const PORT = process.env.PORT ?? 8080;
 const API_TOKEN = process.env.API_SECRET;
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || API_TOKEN; // Fallback para API_SECRET se WEBHOOK_TOKEN não estiver definido
 
+// ✅ NOVO: Variáveis de ambiente para multi-instância
+const CLIENT_ID = process.env.CLIENT_ID;
+const API_TOKEN_NODE = process.env.API_TOKEN || process.env.WH_API_TOKEN || API_TOKEN;
+const LARAVEL_API_URL = process.env.LARAVEL_API_URL || process.env.WEBHOOK_URL?.replace('/api/whatsapp/webhook', '') || 'https://devdashboard.menuolika.com.br';
+
+// ✅ NOVO: Cliente global
+global.client = null;
+
 // Variáveis globais (já inicializadas no socket.js, mas garantindo aqui também)
 global.currentQR = null;
 global.currentQRTimestamp = null;
 global.currentPairingCode = null;
 global.currentWhatsAppPhone = null;
 global.isConnecting = false; // Flag para evitar múltiplas conexões simultâneas
+
+/**
+ * ✅ NOVO: Carrega informações do cliente do Laravel
+ */
+async function carregarCliente() {
+    if (!CLIENT_ID || !API_TOKEN_NODE || !LARAVEL_API_URL) {
+        logger.error('❌ Variáveis CLIENT_ID, API_TOKEN ou LARAVEL_API_URL não configuradas');
+        throw new Error('Configuração incompleta para multi-instância');
+    }
+
+    try {
+        const response = await axios.get(
+            `${LARAVEL_API_URL}/api/client/${CLIENT_ID}`,
+            {
+                headers: {
+                    'X-API-Token': API_TOKEN_NODE,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 5000
+            }
+        );
+
+        global.client = response.data;
+        logger.info(`✅ Cliente carregado: ${global.client.name} (Plano: ${global.client.plan})`);
+
+        return global.client;
+    } catch (error) {
+        logger.error(`❌ Erro ao carregar cliente: ${error.message}`);
+        throw error;
+    }
+}
+
+/**
+ * ✅ NOVO: Verifica se deve carregar módulos de IA
+ */
+function deveCarregarIA() {
+    return global.client && global.client.has_ia && global.client.plan === 'ia';
+}
 
 // Middleware de Segurança para endpoints protegidos
 const requireAuth = (req, res, next) => {
@@ -563,14 +610,40 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 // 🚀 CRÍTICO: Iniciar servidor HTTP IMEDIATAMENTE (independente do Baileys)
 // IMPORTANTE: Escutar em 0.0.0.0 para permitir acesso externo do Railway
 // Sem isso, o Railway não consegue acessar o container (erro "Application failed to respond")
-// O app.listen retorna o objeto Server - precisamos capturá-lo para graceful shutdown
-server = app.listen(PORT, '0.0.0.0', () => {
-    logger.info(`✅ Servidor HTTP rodando na porta ${PORT}`);
-    logger.info('📡 Endpoints disponíveis:');
-    logger.info('   - GET  / (health check)');
-    logger.info('   - GET  /api/whatsapp/status');
-    logger.info('   - POST /api/whatsapp/connect');
-    logger.info('   - POST /api/whatsapp/send');
-    logger.info('   - POST /api/notify (notificações Laravel)');
-    logger.info('⏸️ Servidor pronto. Aguardando solicitação de conexão via /api/whatsapp/connect');
-});
+// ✅ NOVO: Carregar cliente antes de iniciar servidor
+(async () => {
+    try {
+        await carregarCliente();
+        
+        // Só inicia serviços se cliente estiver ativo
+        if (!global.client.active) {
+            logger.error('❌ Cliente inativo. Serviços não iniciados.');
+            process.exit(1);
+        }
+
+        // Se plano for básico, não carrega IA
+        if (!deveCarregarIA()) {
+            logger.warn('⚠️ Plano básico detectado. Módulos de IA não serão carregados.');
+        }
+
+        // Iniciar servidor após carregar cliente
+        iniciarServidor();
+    } catch (error) {
+        logger.error('❌ Falha ao inicializar. Encerrando...');
+        process.exit(1);
+    }
+})();
+
+function iniciarServidor() {
+    // O app.listen retorna o objeto Server - precisamos capturá-lo para graceful shutdown
+    server = app.listen(PORT, '0.0.0.0', () => {
+        logger.info(`✅ Servidor HTTP rodando na porta ${PORT}`);
+        logger.info('📡 Endpoints disponíveis:');
+        logger.info('   - GET  / (health check)');
+        logger.info('   - GET  /api/whatsapp/status');
+        logger.info('   - POST /api/whatsapp/connect');
+        logger.info('   - POST /api/whatsapp/send');
+        logger.info('   - POST /api/notify (notificações Laravel)');
+        logger.info('⏸️ Servidor pronto. Aguardando solicitação de conexão via /api/whatsapp/connect');
+    });
+}

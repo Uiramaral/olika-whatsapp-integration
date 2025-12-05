@@ -21,6 +21,9 @@ const BASE_AUTH_DIR = path.resolve(__dirname, "..", "..", "auth_info_baileys");
 const CONFIG_FILE = path.join(BASE_AUTH_DIR, "session_config.json");
 const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://devdashboard.menuolika.com.br/api/whatsapp/webhook";
 
+// ✅ NOVO: Variáveis para multi-instância
+const CLIENT_ID = process.env.CLIENT_ID;
+
 // 🚨 Configurações de Controle de IA
 const AI_STATUS_URL = process.env.AI_STATUS_URL;
 const WH_API_TOKEN = process.env.WH_API_TOKEN;
@@ -255,7 +258,12 @@ const startSock = async (phoneOverride = null) => {
       global.currentPairingCode = null;
       consecutiveFailures = 0; // 👈 ZERA O CONTADOR DE SUCESSO
       
-      axios.post(WEBHOOK_URL, { type: 'connection_update', instance_phone: currentPhone, status: 'CONNECTED' }).catch(() => {});
+      axios.post(WEBHOOK_URL, { 
+        client_id: CLIENT_ID, // ✅ NOVO: Multi-instância
+        type: 'connection_update', 
+        instance_phone: currentPhone, 
+        status: 'CONNECTED' 
+      }).catch(() => {});
     }
 
     if (connection === "close") {
@@ -266,7 +274,12 @@ const startSock = async (phoneOverride = null) => {
       console.log(`🔴 Desconectado (${reason}). Tentativa ${consecutiveFailures}/${MAX_FAILURES}.`);
 
       // 🔔 Webhook de Status
-      axios.post(WEBHOOK_URL, { type: 'connection_update', instance_phone: currentPhone, status: 'DISCONNECTED' }).catch(() => {});
+      axios.post(WEBHOOK_URL, { 
+        client_id: CLIENT_ID, // ✅ NOVO: Multi-instância
+        type: 'connection_update', 
+        instance_phone: currentPhone, 
+        status: 'DISCONNECTED' 
+      }).catch(() => {});
 
 
       // 🚨 NÍVEL 2/3: LOGOUT FATAL OU LIMITE DE FALHAS EXCEDIDO
@@ -328,6 +341,7 @@ const startSock = async (phoneOverride = null) => {
         
         // Webhook para LOG no Laravel
         axios.post(WEBHOOK_URL, {
+            client_id: CLIENT_ID, // ✅ NOVO: Multi-instância
             phone: senderJid.replace("@s.whatsapp.net", ""),
             instance_phone: currentPhone,
             message: text,
