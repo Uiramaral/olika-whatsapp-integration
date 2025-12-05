@@ -5,11 +5,14 @@ WORKDIR /app
 # Instala git para o Baileys
 RUN apk add --no-cache git
 
-# Garante que o diretório de credenciais existe ANTES de copiar o código.
+# Garante que o diretï¿½rio de credenciais existe ANTES de copiar o cï¿½digo.
 RUN mkdir -p /app/auth_info_baileys 
 
 COPY package*.json ./
 RUN npm ci --only=production
+
+# Instala Railway CLI globalmente para uso de scripts
+RUN npm install -g @railway/cli
 
 COPY . .
 

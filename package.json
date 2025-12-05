@@ -5,7 +5,8 @@
   "main": "src/app.js",
   "scripts": {
     "start": "node src/app.js",
-    "get-token": "node scripts/getRailwayToken.js"
+    "get-token": "node scripts/getRailwayToken.js",
+    "get-token:install": "npm install -g @railway/cli && node scripts/getRailwayToken.js"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",
