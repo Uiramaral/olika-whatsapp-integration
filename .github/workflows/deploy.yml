@@ -32,7 +32,7 @@ jobs:
         with:
           node-version: '20' # ⚙️ Use a mesma versão que você usa localmente/no Railway
           cache: 'npm'
-          cache-dependency-path: olika-whatsapp-integration/package-lock.json
+          cache-dependency-path: ./olika-whatsapp-integration/package-lock.json
 
       # 3. Instala as dependências do projeto
       - name: Install Dependencies
