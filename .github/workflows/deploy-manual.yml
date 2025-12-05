@@ -1,4 +1,4 @@
-name: Railway Deploy - Manual Trigger
+name: Railway Deploy - Manual Trigger (Stable)
 
 on:
   workflow_dispatch:
@@ -22,39 +22,44 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: 🧾 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: 🧱 Instalar Node.js manualmente (sem cache)
+        run: |
+          echo "⚙️ Instalando Node.js 20.x..."
+          sudo apt-get update -y
+          sudo apt-get install -y ca-certificates curl gnupg
+          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+          node -v
+          npm -v
 
-      - name: Install Dependencies
+      - name: 📦 Instalar dependências
         working-directory: ./olika-whatsapp-integration
         run: npm ci
 
-      - name: Install Railway CLI
+      - name: 🚀 Instalar Railway CLI
         run: npm install -g @railway/cli
-      
-      - name: Authenticate with Railway
+
+      - name: 🔑 Autenticar no Railway
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: railway login --token $RAILWAY_TOKEN
 
-      - name: Deploy to Railway
+      - name: 🚢 Deploy para Railway
         working-directory: ./olika-whatsapp-integration
         run: |
-          echo "🚀 Deploy manual iniciado..."
+          echo "🚀 Iniciando deploy manual..."
           echo "📦 Serviço: ${{ inputs.service_name || 'padrão' }}"
           echo "🌍 Ambiente: ${{ inputs.environment }}"
-          
+
           if [ -n "${{ inputs.service_name }}" ]; then
             railway up --service ${{ inputs.service_name }}
           else
             railway up
           fi
-      
-      - name: Check Deployment Status
+
+      - name: ✅ Verificar status do deploy
         working-directory: ./olika-whatsapp-integration
         run: railway status || echo "⚠️ Status não disponível"
