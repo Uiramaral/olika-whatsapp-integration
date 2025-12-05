@@ -1,6 +1,5 @@
 name: Railway Deploy - Manual Trigger
 
-# 🎯 Permite execução manual via GitHub Actions UI
 on:
   workflow_dispatch:
     inputs:
@@ -38,7 +37,6 @@ jobs:
           cache-dependency-path: ./olika-whatsapp-integration/package-lock.json
 
       - name: Install Dependencies
-        working-directory: ./olika-whatsapp-integration
         run: npm ci
 
       - name: Install Railway CLI
@@ -50,7 +48,6 @@ jobs:
         run: railway login --token $RAILWAY_TOKEN
 
       - name: Deploy to Railway
-        working-directory: ./olika-whatsapp-integration
         run: |
           echo "🚀 Deploy manual iniciado..."
           echo "📦 Serviço: ${{ inputs.service_name || 'padrão' }}"
@@ -63,6 +60,4 @@ jobs:
           fi
       
       - name: Check Deployment Status
-        working-directory: ./olika-whatsapp-integration
         run: railway status || echo "⚠️ Status não disponível"
-
