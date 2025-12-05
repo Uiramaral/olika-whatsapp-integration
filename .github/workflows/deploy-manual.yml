@@ -25,21 +25,31 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🔍 Listar estrutura de arquivos (debug)
+      - name: 🔍 Verificar estrutura e arquivos
         run: |
-          echo "🗂️ Estrutura do repositório:"
+          echo "🗂️ Estrutura de diretórios:"
           ls -R
           echo ""
-          echo "Verificando se package-lock.json existe:"
+          echo "🔍 Procurando package-lock.json..."
           find . -name "package-lock.json"
 
       - name: Setup Node.js
+        id: setup-node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: ./olika-whatsapp-integration/package-lock.json
-        working-directory: ./olika-whatsapp-integration
+          node-version: '20.x'
+        continue-on-error: true
+
+      - name: 🚧 Fallback Node Setup (caso a action falhe)
+        if: steps.setup-node.outcome == 'failure'
+        run: |
+          echo "⚠️ A action setup-node falhou. Instalando Node manualmente..."
+          sudo apt-get update -y
+          sudo apt-get install -y ca-certificates curl gnupg
+          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+          node -v
+          npm -v
 
       - name: Install Dependencies
         working-directory: ./olika-whatsapp-integration
