@@ -21,22 +21,28 @@ jobs:
   deployment:
     runs-on: ubuntu-latest
 
-    defaults:
-      run:
-        working-directory: ./olika-whatsapp-integration
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-      
+
+      - name: 🔍 Listar estrutura de arquivos (debug)
+        run: |
+          echo "🗂️ Estrutura do repositório:"
+          ls -R
+          echo ""
+          echo "Verificando se package-lock.json existe:"
+          find . -name "package-lock.json"
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: '**/package-lock.json'
+          cache-dependency-path: ./olika-whatsapp-integration/package-lock.json
+        working-directory: ./olika-whatsapp-integration
 
       - name: Install Dependencies
+        working-directory: ./olika-whatsapp-integration
         run: npm ci
 
       - name: Install Railway CLI
@@ -48,6 +54,7 @@ jobs:
         run: railway login --token $RAILWAY_TOKEN
 
       - name: Deploy to Railway
+        working-directory: ./olika-whatsapp-integration
         run: |
           echo "🚀 Deploy manual iniciado..."
           echo "📦 Serviço: ${{ inputs.service_name || 'padrão' }}"
@@ -60,4 +67,5 @@ jobs:
           fi
       
       - name: Check Deployment Status
+        working-directory: ./olika-whatsapp-integration
         run: railway status || echo "⚠️ Status não disponível"
