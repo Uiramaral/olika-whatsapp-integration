@@ -1,0 +1,84 @@
+name: Railway Deploy - Olika Gateway
+
+# 🎯 Aciona o workflow em push para o branch 'main'
+on:
+  push:
+    branches:
+      - main
+      - master # Adicione outros branches que disparam o deploy, se necessário
+    paths:
+      - 'olika-whatsapp-integration/**' # Só deploys quando há mudanças nesta pasta
+  workflow_dispatch: # Permite execução manual
+
+jobs:
+  # O Job que executa o deploy
+  deployment:
+    # 🔍 Ambiente de execução: Node.js (compatível com a CLI do Railway)
+    runs-on: ubuntu-latest
+
+    # Define o diretório de trabalho como a pasta do projeto Node.js
+    defaults:
+      run:
+        working-directory: ./olika-whatsapp-integration
+
+    steps:
+      # 1. Checkout do código
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      # 2. Configura ambiente Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # ⚙️ Use a mesma versão que você usa localmente/no Railway
+          cache: 'npm'
+          cache-dependency-path: olika-whatsapp-integration/package-lock.json
+
+      # 3. Instala as dependências do projeto
+      - name: Install Dependencies
+        working-directory: ./olika-whatsapp-integration
+        run: npm ci
+
+      # 4. Instala a Railway CLI
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      
+      # 5. Injeta e autentica o token de serviço (CRÍTICO)
+      # O RAILWAY_TOKEN é lido do GitHub Secrets
+      - name: Authenticate with Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway login --token $RAILWAY_TOKEN
+
+      # 6. Executa o Deploy
+      # O comando 'railway up' detecta o projeto atual e o serviço automaticamente
+      - name: Deploy to Railway Production
+        working-directory: ./olika-whatsapp-integration
+        run: |
+          echo "🚀 Iniciando deploy para Railway..."
+          railway up --service olika-gateway
+        # 💡 Opcional: Especifique o nome do serviço (ex: 'gateway', 'backend') 
+        # se tiver múltiplos serviços no Railway.
+        # Se não especificar, o Railway usa o serviço padrão do projeto.
+      
+      # 7. Monitora o status pós-deploy
+      - name: Check Deployment Status
+        working-directory: ./olika-whatsapp-integration
+        run: |
+          echo "📊 Verificando status do deploy..."
+          railway status || echo "⚠️ Comando 'railway status' não disponível"
+          
+      # 8. Notificação de sucesso (opcional)
+      - name: Deployment Success
+        if: success()
+        run: |
+          echo "✅ Deploy concluído com sucesso!"
+          echo "🔗 Verifique o status no Railway Dashboard"
+
+      # 9. Notificação de falha (opcional)
+      - name: Deployment Failed
+        if: failure()
+        run: |
+          echo "❌ Deploy falhou!"
+          echo "📋 Verifique os logs acima para mais detalhes"
+

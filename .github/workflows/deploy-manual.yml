@@ -1,0 +1,68 @@
+name: Railway Deploy - Manual Trigger
+
+# 🎯 Permite execução manual via GitHub Actions UI
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: 'Nome do serviço Railway (deixe vazio para usar o padrão)'
+        required: false
+        type: string
+        default: 'olika-gateway'
+      environment:
+        description: 'Ambiente de deploy'
+        required: true
+        type: choice
+        options:
+          - production
+          - staging
+        default: 'production'
+
+jobs:
+  deployment:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./olika-whatsapp-integration
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: olika-whatsapp-integration/package-lock.json
+
+      - name: Install Dependencies
+        working-directory: ./olika-whatsapp-integration
+        run: npm ci
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      
+      - name: Authenticate with Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway login --token $RAILWAY_TOKEN
+
+      - name: Deploy to Railway
+        working-directory: ./olika-whatsapp-integration
+        run: |
+          echo "🚀 Deploy manual iniciado..."
+          echo "📦 Serviço: ${{ inputs.service_name || 'padrão' }}"
+          echo "🌍 Ambiente: ${{ inputs.environment }}"
+          
+          if [ -n "${{ inputs.service_name }}" ]; then
+            railway up --service ${{ inputs.service_name }}
+          else
+            railway up
+          fi
+      
+      - name: Check Deployment Status
+        working-directory: ./olika-whatsapp-integration
+        run: railway status || echo "⚠️ Status não disponível"
+
