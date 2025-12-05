@@ -1,12 +1,11 @@
 name: Railway Deploy - Olika Gateway
 
-# 🎯 Aciona o workflow em push para o branch 'main'
 on:
   push:
     branches:
       - main
       - master
-  workflow_dispatch: # Permite execução manual
+  workflow_dispatch:
 
 jobs:
   deployment:
@@ -17,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v3
         with:
           node-version: '20'
 
@@ -38,18 +37,4 @@ jobs:
           railway up --service olika-gateway
       
       - name: Check Deployment Status
-        run: |
-          echo "📊 Verificando status do deploy..."
-          railway status || echo "⚠️ Comando 'railway status' não disponível"
-          
-      - name: Deployment Success
-        if: success()
-        run: |
-          echo "✅ Deploy concluído com sucesso!"
-          echo "🔗 Verifique o status no Railway Dashboard"
-
-      - name: Deployment Failed
-        if: failure()
-        run: |
-          echo "❌ Deploy falhou!"
-          echo "📋 Verifique os logs acima para mais detalhes"
+        run: railway status || echo "⚠️ Status não disponível"
