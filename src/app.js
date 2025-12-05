@@ -17,7 +17,7 @@ const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || API_TOKEN; // Fallback para A
 // ✅ NOVO: Variáveis de ambiente para multi-instância
 const CLIENT_ID = process.env.CLIENT_ID;
 const API_TOKEN_NODE = process.env.API_TOKEN || process.env.WH_API_TOKEN || API_TOKEN;
-const LARAVEL_API_URL = process.env.LARAVEL_API_URL || process.env.WEBHOOK_URL?.replace('/api/whatsapp/webhook', '') || 'https://devdashboard.menuolika.com.br';
+const LARAVEL_API_URL = process.env.LARAVEL_API_URL || process.env.WEBHOOK_URL?.replace('/api/whatsapp/webhook', '') || 'https://devpedido.menuolika.com.br';
 
 // ✅ NOVO: Cliente global
 global.client = null;
@@ -126,7 +126,7 @@ app.get('/api/whatsapp/status', requireAuth, (req, res) => {
 // Função para buscar número do WhatsApp do banco de dados
 // IMPORTANTE: Prioriza sempre o banco de dados sobre variáveis de ambiente
 async function getWhatsAppPhone() {
-    const laravelApiUrl = process.env.LARAVEL_API_URL || 'https://devdashboard.menuolika.com.br';
+    const laravelApiUrl = process.env.LARAVEL_API_URL || 'https://devpedido.menuolika.com.br';
     const laravelApiKey = process.env.API_SECRET || API_TOKEN;
     
     try {

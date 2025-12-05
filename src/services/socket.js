@@ -19,7 +19,7 @@ const { getContentType } = require('@whiskeysockets/baileys');
 // Configurações
 const BASE_AUTH_DIR = path.resolve(__dirname, "..", "..", "auth_info_baileys");
 const CONFIG_FILE = path.join(BASE_AUTH_DIR, "session_config.json");
-const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://devdashboard.menuolika.com.br/api/whatsapp/webhook";
+const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://devpedido.menuolika.com.br/api/whatsapp/webhook";
 
 // ✅ NOVO: Variáveis para multi-instância
 const CLIENT_ID = process.env.CLIENT_ID;
