@@ -34,22 +34,11 @@ jobs:
           find . -name "package-lock.json"
 
       - name: Setup Node.js
-        id: setup-node
         uses: actions/setup-node@v4
         with:
           node-version: '20.x'
-        continue-on-error: true
-
-      - name: 🚧 Fallback Node Setup (caso a action falhe)
-        if: steps.setup-node.outcome == 'failure'
-        run: |
-          echo "⚠️ A action setup-node falhou. Instalando Node manualmente..."
-          sudo apt-get update -y
-          sudo apt-get install -y ca-certificates curl gnupg
-          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-          sudo apt-get install -y nodejs
-          node -v
-          npm -v
+          cache: 'npm'
+        working-directory: ./olika-whatsapp-integration
 
       - name: Install Dependencies
         working-directory: ./olika-whatsapp-integration
