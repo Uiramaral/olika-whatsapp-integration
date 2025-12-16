@@ -1,0 +1,70 @@
+name: 🚀 Deploy Client to Railway
+
+on:
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: 'ID do cliente'
+        required: true
+        type: string
+      client_name:
+        description: 'Nome do cliente'
+        required: true
+        type: string
+      client_slug:
+        description: 'Slug único (ex: pizzaria-bella-vista-1234)'
+        required: true
+        type: string
+      environment:
+        description: 'Ambiente de deploy'
+        required: false
+        type: choice
+        options:
+          - production
+          - staging
+        default: production
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📦 Checkout Repositório
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: 📦 Instalar Dependências
+        run: npm ci
+
+      - name: 🚀 Deploy no Railway
+        uses: railwayapp/action@v2
+        with:
+          railwayToken: ${{ secrets.RAILWAY_TOKEN }}
+          serviceName: olika-gateway
+          environment: ${{ github.event.inputs.environment }}
+
+      - name: 🧾 Callback para Laravel
+        env:
+          LARAVEL_WEBHOOK_URL: ${{ secrets.LARAVEL_WEBHOOK_URL }}
+        run: |
+          echo "✅ Notificando Laravel sobre o deploy..."
+          
+          if [ -n "$LARAVEL_WEBHOOK_URL" ]; then
+            curl -X POST "$LARAVEL_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"client_id\": \"${{ github.event.inputs.client_id }}\",
+                \"client_slug\": \"${{ github.event.inputs.client_slug }}\",
+                \"status\": \"completed\",
+                \"branch\": \"${{ github.ref_name }}\",
+                \"run_id\": \"${{ github.run_id }}\"
+              }" || echo "⚠️ Falha ao notificar Laravel, mas deploy foi concluído"
+          else
+            echo "⚠️ LARAVEL_WEBHOOK_URL não configurado, pulando callback"
+          fi
+
+
