@@ -318,34 +318,7 @@ const startSock = async (phoneOverride = null) => {
 
   // Eventos Mantidos - Orquestração Completa de IA
   sock.ev.on("messages.upsert", async ({ messages }) => {
-    const incomingMessage = messages[0];
-
-        // --- 📩 Notificação de nova mensagem para número fixo (controle de 10 minutos) ---
-        try {
-          const notifyNumber = "5571981750546@s.whatsapp.net"; // número de destino da notificação
-          const cooldown = 10 * 60 * 1000; // 10 minutos
-          const sender = incomingMessage.key.remoteJid;
-          const fromMe = incomingMessage.key.fromMe;
-          if (fromMe) return; // ignora mensagens enviadas pelo próprio bot
-  
-          // Controle de cache em memória
-          if (!global.lastNotification) global.lastNotification = new Map();
-  
-          const now = Date.now();
-          const lastTime = global.lastNotification.get(sender) || 0;
-  
-          if (now - lastTime > cooldown) {
-              const text = `📩 Nova mensagem de ${sender.replace("@s.whatsapp.net", "")}`;
-              await sock.sendMessage(notifyNumber, { text });
-              global.lastNotification.set(sender, now);
-              console.log(`[NOTIFICAÇÃO] ${text}`);
-          } else {
-              console.log(`⏱ Sem notificação — ${sender} foi notificado há menos de 10 minutos.`);
-          }
-      } catch (notifErr) {
-          console.error("Erro ao enviar notificação de nova mensagem:", notifErr.message);
-      }
-  
+    const incomingMessage = messages[0];s
     
     // Filtro essencial para não processar status ou mensagens próprias
     if (incomingMessage.key.fromMe || !incomingMessage.message) return;
