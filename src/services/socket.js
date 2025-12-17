@@ -318,7 +318,7 @@ const startSock = async (phoneOverride = null) => {
 
   // Eventos Mantidos - Orquestração Completa de IA
   sock.ev.on("messages.upsert", async ({ messages }) => {
-    const incomingMessage = messages[0];s
+    const incomingMessage = messages[0];
     
     // Filtro essencial para não processar status ou mensagens próprias
     if (incomingMessage.key.fromMe || !incomingMessage.message) return;
