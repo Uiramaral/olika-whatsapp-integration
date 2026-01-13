@@ -244,7 +244,7 @@ const startSock = async (phoneOverride = null) => {
       } catch (err) { 
         console.error("❌ Erro ao pedir código:", err.message); 
       }
-    }, 15000); 
+    }, 5000); 
   }
 
   // Monitoramento de Conexão
