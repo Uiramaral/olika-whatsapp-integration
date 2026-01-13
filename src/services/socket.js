@@ -233,7 +233,7 @@ const startSock = async (phoneOverride = null) => {
 
   // Geração do Código de Pareamento
   if (!sock.authState.creds.registered) {
-    console.log("⏳ Aguardando (15s) para pedir código...");
+    console.log("⏳ Aguardando (5s) para pedir código...");
     setTimeout(async () => {
       try {
         const code = await sock.requestPairingCode(currentPhone.replace(/\D/g, ""));
@@ -244,7 +244,7 @@ const startSock = async (phoneOverride = null) => {
       } catch (err) { 
         console.error("❌ Erro ao pedir código:", err.message); 
       }
-    }, 15000); 
+    }, 5000); 
   }
 
   // Monitoramento de Conexão
