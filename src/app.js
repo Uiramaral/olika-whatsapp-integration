@@ -117,9 +117,16 @@ app.get('/api/whatsapp/status', requireAuth, (req, res) => {
     res.json({
         connected: isConnected(), // Mantido para compatibilidade com Laravel
         isConnected: isConnected(), // Novo padrão
+        isConnecting: global.isConnecting || false, // 🆕 Flag de conexão em andamento
         pairingCode: global.currentPairingCode || null, 
         currentPhone: getCurrentPhone() || null, 
-        message: isConnected() ? 'Conectado e Operacional' : (global.currentPairingCode ? 'Aguardando Pareamento' : 'Em Standby (Offline)')
+        message: isConnected() 
+            ? 'Conectado e Operacional' 
+            : (global.isConnecting 
+                ? 'Conectando...' 
+                : (global.currentPairingCode 
+                    ? 'Aguardando Pareamento' 
+                    : 'Em Standby (Offline)'))
     });
 });
 
@@ -314,14 +321,54 @@ app.post('/api/whatsapp/connect', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'O número de telefone (phone) é obrigatório no corpo da requisição.' });
         }
         
+        // 🆕 Verificar se já está conectado
+        if (isConnected()) {
+            return res.status(400).json({ 
+                error: 'WhatsApp já está conectado.', 
+                connected: true,
+                currentPhone: getCurrentPhone()
+            });
+        }
+        
+        // 🆕 Verificar se já está tentando conectar (evita duplicação)
+        if (global.isConnecting) {
+            return res.status(429).json({ 
+                error: 'Conexão já em andamento. Aguarde o código de pareamento.',
+                isConnecting: true,
+                pairingCode: global.currentPairingCode || null
+            });
+        }
+        
+        // 🆕 Marcar como conectando
+        global.isConnecting = true;
+        
         // Inicia ou configura o número e tenta gerar o código
         await startSock(phone);
+        
+        // 🆕 Aguardar até 8 segundos pelo código de pareamento (3s delay + 5s margem)
+        let attempts = 0;
+        const maxAttempts = 16; // 16 * 500ms = 8 segundos
+        
+        while (!global.currentPairingCode && attempts < maxAttempts) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            attempts++;
+        }
+        
+        // Liberar flag após timeout
+        setTimeout(() => {
+            if (!isConnected()) {
+                global.isConnecting = false;
+            }
+        }, 60000); // Libera após 1 minuto se não conectar
 
         res.json({ 
             success: true, 
-            message: `Conexão iniciada para o número: ${phone}. Verifique os logs para o código de pareamento.` 
+            message: `Conexão iniciada para o número: ${phone}.`,
+            pairingCode: global.currentPairingCode || null,
+            waitingForCode: !global.currentPairingCode
         });
     } catch (error) {
+        global.isConnecting = false; // 🆕 Liberar flag em caso de erro
         logger.error('Erro na rota /connect:', error.message);
         res.status(500).json({ error: 'Falha ao iniciar a conexão.' });
     }

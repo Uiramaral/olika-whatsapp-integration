@@ -51,9 +51,13 @@ let globalSock = null;
 let isSocketConnected = false;
 let currentPhone = null;
 
-// 🚨 NOVO: Contador de falhas e limite
+// 🚨 Contador de falhas e limite
 let consecutiveFailures = 0;
-const MAX_FAILURES = 3; 
+const MAX_FAILURES = 5; // Aumentado de 3 para 5
+
+// 🆕 Flag para evitar reconexões duplicadas e controlar estado de pareamento
+let isConnecting = false;
+let isPairingInProgress = false; // Não conta falhas durante pareamento 
 
 // --- Persistência de Configuração ---
 const loadConfig = () => {
@@ -228,23 +232,44 @@ const startSock = async (phoneOverride = null) => {
     markOnlineOnConnect: true,
     syncFullHistory: false,
     msgRetryCounterCache,
-    connectTimeoutMs: 60000,
+    connectTimeoutMs: 90000, // Aumentado de 60s para 90s
+    retryRequestDelayMs: 2000, // Delay entre retentativas
+    defaultQueryTimeoutMs: 60000, // Timeout para queries
   });
 
   // Geração do Código de Pareamento
   if (!sock.authState.creds.registered) {
-    console.log("⏳ Aguardando (5s) para pedir código...");
+    isPairingInProgress = true; // 🆕 Marca que está pareando
+    console.log("⏳ Aguardando (3s) para pedir código...");
     setTimeout(async () => {
-      try {
-        const code = await sock.requestPairingCode(currentPhone.replace(/\D/g, ""));
-        console.log(`\n#################################################`);
-        console.log(`📠 CÓDIGO (${currentPhone}): ${code?.match(/.{1,4}/g)?.join("-")}`);
-        console.log(`#################################################\n`);
-        global.currentPairingCode = code;
-      } catch (err) { 
-        console.error("❌ Erro ao pedir código:", err.message); 
+      // 🆕 Retry: tenta até 3 vezes pedir o código
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          console.log(`📱 Tentativa ${attempt}/3 de solicitar código...`);
+          const code = await sock.requestPairingCode(currentPhone.replace(/\D/g, ""));
+          console.log(`\n#################################################`);
+          console.log(`📠 CÓDIGO (${currentPhone}): ${code?.match(/.{1,4}/g)?.join("-")}`);
+          console.log(`#################################################\n`);
+          global.currentPairingCode = code;
+          
+          // 🆕 Timeout para limpar código expirado (5 minutos)
+          setTimeout(() => {
+            if (global.currentPairingCode === code && !isSocketConnected) {
+              console.log("⏰ Código de pareamento expirado. Solicite novo código.");
+              global.currentPairingCode = null;
+            }
+          }, 5 * 60 * 1000);
+          
+          break; // Sucesso, sai do loop
+        } catch (err) { 
+          console.error(`❌ Erro ao pedir código (tentativa ${attempt}/3):`, err.message);
+          if (attempt < 3) {
+            console.log("🔄 Aguardando 2s antes de tentar novamente...");
+            await new Promise(r => setTimeout(r, 2000));
+          }
+        }
       }
-    }, 5000); 
+    }, 3000); // Reduzido de 5s para 3s
   }
 
   // Monitoramento de Conexão
@@ -255,6 +280,8 @@ const startSock = async (phoneOverride = null) => {
       console.log(`✅ ${currentPhone} CONECTADO!`);
       globalSock = sock;
       isSocketConnected = true;
+      isConnecting = false; // 🆕 Libera flag de conexão
+      isPairingInProgress = false; // 🆕 Pareamento concluído
       global.currentPairingCode = null;
       consecutiveFailures = 0; // 👈 ZERA O CONTADOR DE SUCESSO
       
@@ -268,9 +295,17 @@ const startSock = async (phoneOverride = null) => {
 
     if (connection === "close") {
       isSocketConnected = false;
+      isConnecting = false; // 🆕 Libera flag
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       
-      consecutiveFailures++; // 👈 INCREMENTA A FALHA
+      // 🆕 Não incrementa falhas durante pareamento inicial (códigos 515, 408)
+      const pairingErrorCodes = [515, 408, 428]; // Timeout de pareamento
+      if (isPairingInProgress && pairingErrorCodes.includes(reason)) {
+        console.log(`⚠️ Falha de pareamento (${reason}). Não conta como falha permanente.`);
+        isPairingInProgress = false;
+      } else {
+        consecutiveFailures++; // 👈 INCREMENTA A FALHA apenas se não for pareamento
+      }
       console.log(`🔴 Desconectado (${reason}). Tentativa ${consecutiveFailures}/${MAX_FAILURES}.`);
 
       // 🔔 Webhook de Status
