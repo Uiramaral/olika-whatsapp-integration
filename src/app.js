@@ -69,7 +69,8 @@ function deveCarregarIA() {
 
 // Middleware de Segurança para endpoints protegidos
 const requireAuth = (req, res, next) => {
-    const token = req.headers['x-api-token'] || req.headers['x-webhook-token'] || req.headers['x-olika-token'];
+    // Aceita token de múltiplas fontes para compatibilidade (inclui 'apikey' para Evolution API)
+    const token = req.headers['x-api-token'] || req.headers['x-webhook-token'] || req.headers['x-olika-token'] || req.headers['apikey'];
     
     // Se não tiver token configurado, bloquear por segurança
     if (!API_TOKEN && !WEBHOOK_TOKEN) {
@@ -77,12 +78,12 @@ const requireAuth = (req, res, next) => {
         return res.status(500).json({ error: 'Configuração de servidor inválida' });
     }
 
-    const validToken = token === API_TOKEN || token === WEBHOOK_TOKEN;
+    const validToken = token === API_TOKEN || token === WEBHOOK_TOKEN || token === API_TOKEN_NODE;
     
     if (validToken) {
         next();
     } else {
-        logger.warn(`Tentativa de acesso negado. Token recebido: ${token ? '***' : 'nenhum'}`);
+        logger.warn(`Tentativa de acesso negado. Token recebido: ${token ? token.substring(0, 10) + '...' : 'nenhum'}`);
         res.status(403).json({ error: 'Acesso negado' });
     }
 };
@@ -411,6 +412,99 @@ app.post('/send-message', requireAuth, async (req, res) => {
     } catch (error) {
         logger.error(`❌ Erro no envio: ${error.message}`);
         res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
+// ROTAS DE COMPATIBILIDADE COM EVOLUTION API
+// Para permitir que WhatsAppService do Laravel funcione
+// ============================================
+
+// Rota para envio de texto (formato Evolution API)
+// POST /message/sendText/:instance
+app.post('/message/sendText/:instance', requireAuth, async (req, res) => {
+    try {
+        const { number, text } = req.body;
+        const message = text; // Evolution usa 'text', nosso sistema usa 'message'
+        
+        if (!number || !message) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Campos obrigatórios: number, text' 
+            });
+        }
+
+        if (!isConnected()) {
+            return res.status(503).json({ 
+                success: false,
+                error: 'WhatsApp não conectado',
+                retry: true 
+            });
+        }
+
+        logger.info(`[Evolution API] Enviando mensagem para ${number} via instância ${req.params.instance}`);
+        const result = await sendMessage(number, message);
+        
+        res.json({
+            success: true,
+            messageId: result.messageId,
+            status: 'SENT'
+        });
+
+    } catch (error) {
+        logger.error(`[Evolution API] Erro no envio: ${error.message}`);
+        res.status(500).json({ 
+            success: false,
+            error: error.message 
+        });
+    }
+});
+
+// Rota para envio de mídia (formato Evolution API) - placeholder
+app.post('/message/sendMedia/:instance', requireAuth, async (req, res) => {
+    logger.warn('[Evolution API] sendMedia não implementado ainda');
+    res.status(501).json({ 
+        success: false,
+        error: 'sendMedia não implementado nesta versão' 
+    });
+});
+
+// Health check da instância (formato Evolution API)
+app.get('/instance/health/:instance', requireAuth, (req, res) => {
+    const status = {
+        instance: req.params.instance,
+        connected: isConnected(),
+        state: isConnected() ? 'CONNECTED' : 'DISCONNECTED',
+        timestamp: new Date().toISOString()
+    };
+    
+    logger.info(`[Evolution API] Health check: ${status.state}`);
+    res.json(status);
+});
+
+// Connect instance (formato Evolution API)
+app.get('/instance/connect/:instance', requireAuth, async (req, res) => {
+    if (isConnected()) {
+        return res.json({ 
+            success: true, 
+            status: 'ALREADY_CONNECTED',
+            message: 'Instância já conectada'
+        });
+    }
+    
+    try {
+        await startSock();
+        res.json({ 
+            success: true, 
+            status: 'CONNECTING',
+            message: 'Conexão iniciada'
+        });
+    } catch (error) {
+        logger.error(`[Evolution API] Erro ao conectar: ${error.message}`);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
     }
 });
 
