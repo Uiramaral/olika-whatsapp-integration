@@ -31,11 +31,13 @@ global.isConnecting = false; // Flag para evitar múltiplas conexões simultâne
 
 /**
  * ✅ NOVO: Carrega informações do cliente do Laravel
+ * Modo resiliente: não bloqueia inicialização se falhar
  */
 async function carregarCliente() {
     if (!CLIENT_ID || !API_TOKEN_NODE || !LARAVEL_API_URL) {
-        logger.error('❌ Variáveis CLIENT_ID, API_TOKEN ou LARAVEL_API_URL não configuradas');
-        throw new Error('Configuração incompleta para multi-instância');
+        logger.warn('⚠️ Variáveis CLIENT_ID, API_TOKEN ou LARAVEL_API_URL não configuradas');
+        logger.info('📡 Sistema iniciará em modo STANDBY. Configure via /api/whatsapp/connect quando necessário.');
+        return null;
     }
 
     try {
@@ -51,12 +53,31 @@ async function carregarCliente() {
         );
 
         global.client = response.data;
-        logger.info(`✅ Cliente carregado: ${global.client.name} (Plano: ${global.client.plan})`);
+        
+        if (global.client && global.client.name) {
+            logger.info(`✅ Cliente carregado: ${global.client.name} (Plano: ${global.client.plan || 'N/A'})`);
+        } else {
+            logger.warn('⚠️ Resposta do servidor não contém dados válidos do cliente');
+        }
 
         return global.client;
     } catch (error) {
-        logger.error(`❌ Erro ao carregar cliente: ${error.message}`);
-        throw error;
+        // Log detalhado do erro, mas não bloqueia
+        if (error.response) {
+            logger.error(`❌ Erro ao carregar cliente: HTTP ${error.response.status} - ${error.response.statusText}`);
+            logger.error(`📋 URL: ${LARAVEL_API_URL}/api/client/${CLIENT_ID}`);
+            if (error.response.status === 500) {
+                logger.warn('⚠️ Servidor Laravel retornou erro 500. Sistema iniciará em modo STANDBY.');
+            }
+        } else if (error.request) {
+            logger.error(`❌ Erro de conexão ao carregar cliente: ${error.message}`);
+            logger.warn('⚠️ Não foi possível conectar ao Laravel. Sistema iniciará em modo STANDBY.');
+        } else {
+            logger.error(`❌ Erro ao carregar cliente: ${error.message}`);
+        }
+        
+        // Retorna null em vez de lançar erro, permitindo que o sistema continue
+        return null;
     }
 }
 
@@ -751,27 +772,47 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 // 🚀 CRÍTICO: Iniciar servidor HTTP IMEDIATAMENTE (independente do Baileys)
 // IMPORTANTE: Escutar em 0.0.0.0 para permitir acesso externo do Railway
 // Sem isso, o Railway não consegue acessar o container (erro "Application failed to respond")
-// ✅ NOVO: Carregar cliente antes de iniciar servidor
+// ✅ CORREÇÃO: Inicialização resiliente (Modo STANDBY)
+// O servidor SEMPRE inicia, mesmo se não houver cliente ou se houver erro
 (async () => {
     try {
-        await carregarCliente();
+        logger.info('⚙️ Iniciando sistema em modo de verificação...');
         
-        // Só inicia serviços se cliente estiver ativo
-        if (!global.client.active) {
-            logger.error('❌ Cliente inativo. Serviços não iniciados.');
-            process.exit(1);
+        // Tentar carregar cliente, mas não bloquear se falhar
+        try {
+            await carregarCliente();
+            
+            if (global.client && !global.client.active) {
+                logger.warn('⚠️ Cliente inativo no banco de dados. O servidor subirá em modo STANDBY.');
+            } else if (global.client) {
+                logger.info('✅ Cliente carregado com sucesso.');
+            }
+        } catch (error) {
+            logger.error(`⚠️ Falha ao carregar dados iniciais: ${error.message}`);
+            logger.info('📡 Continuando em modo de recuperação/emergência...');
+            // Não bloqueia - continua para iniciar o servidor
         }
 
-        // Se plano for básico, não carrega IA
-        if (!deveCarregarIA()) {
+        // Verificar se deve carregar IA (apenas se cliente estiver disponível)
+        if (global.client && !deveCarregarIA()) {
             logger.warn('⚠️ Plano básico detectado. Módulos de IA não serão carregados.');
         }
 
-        // Iniciar servidor após carregar cliente
+        // 🚀 SEMPRE inicia o servidor, independente do status do cliente
         iniciarServidor();
+        
     } catch (error) {
-        logger.error('❌ Falha ao inicializar. Encerrando...');
-        process.exit(1);
+        logger.error(`❌ Erro crítico na inicialização: ${error.message}`);
+        logger.info('📡 Tentando iniciar servidor em modo de emergência...');
+        
+        // Mesmo com erro crítico, tenta iniciar o servidor para permitir novos cadastros via /connect
+        try {
+            iniciarServidor();
+        } catch (serverError) {
+            logger.error(`❌ Falha crítica ao iniciar servidor: ${serverError.message}`);
+            // Só faz exit se o servidor HTTP realmente não conseguir iniciar
+            process.exit(1);
+        }
     }
 })();
 
