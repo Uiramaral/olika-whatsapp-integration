@@ -463,6 +463,41 @@ const forceLogout = async () => {
   return { success: true, message: "Sessão resetada. Chame /connect para novo pareamento." };
 };
 
+// Desconecta a instância sem deletar credenciais
+const disconnectSock = async () => {
+  console.log("🔴 DESCONEXÃO INICIADA!");
+  
+  if (!globalSock) {
+    console.warn('⚠️  Socket já está desconectado');
+    return { success: true, message: 'Já desconectado' };
+  }
+  
+  try {
+    // 1. Fazer logout para invalidar a sessão no WhatsApp
+    await globalSock.logout();
+    console.log('✅ Logout realizado');
+    
+    // 2. Fechar conexão
+    if (globalSock.ws) {
+      globalSock.ws.close();
+    }
+    globalSock.end();
+    
+    // 3. Limpar referência global (mas NÃO deletar credenciais)
+    globalSock = null;
+    isSocketConnected = false;
+    console.log('✅ Instância desconectada completamente');
+    
+    return { success: true, message: 'Desconectado com sucesso' };
+  } catch (error) {
+    console.error(`❌ Erro ao desconectar: ${error.message}`);
+    // Forçar limpeza mesmo com erro
+    globalSock = null;
+    isSocketConnected = false;
+    throw error;
+  }
+};
+
 // Inicialização: Tenta startar, se não tiver config, entra em STANDBY
 (async () => { 
     setTimeout(async () => {
@@ -494,4 +529,4 @@ const sendMessage = async (phone, message) => {
 const isConnected = () => isSocketConnected;
 const getCurrentPhone = () => currentPhone;
 
-module.exports = { sendMessage, startSock, isConnected, getCurrentPhone, forceLogout };
+module.exports = { sendMessage, startSock, isConnected, getCurrentPhone, forceLogout, disconnectSock };

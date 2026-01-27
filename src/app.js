@@ -541,6 +541,37 @@ app.post('/api/whatsapp/restart', requireAuth, async (req, res) => {
     }
 });
 
+// --- Rota de Desconexão (POST /disconnect) ---
+// Desconecta a instância WhatsApp sem deletar credenciais
+app.post('/api/whatsapp/disconnect', requireAuth, async (req, res) => {
+    const { disconnectSock } = require('./services/socket');
+    
+    if (!isConnected()) {
+        return res.json({ 
+            success: true, 
+            status: 'ALREADY_DISCONNECTED',
+            message: 'Instância já desconectada'
+        });
+    }
+    
+    try {
+        logger.info('🔴 [DISCONNECT] Recebida solicitação de desconexão');
+        await disconnectSock();
+        logger.info('✅ [DISCONNECT] Instância desconectada com sucesso');
+        res.json({ 
+            success: true, 
+            status: 'DISCONNECTED',
+            message: 'Instância desconectada com sucesso'
+        });
+    } catch (error) {
+        logger.error(`[DISCONNECT] Erro ao desconectar: ${error.message}`);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
+});
+
 /**
  * Endpoint profissional para notificações do Laravel
  * Processa payload completo e gera mensagem formatada
