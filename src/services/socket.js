@@ -360,6 +360,13 @@ const startSock = async (phoneOverride = null) => {
     
     const senderJid = incomingMessage.key.remoteJid;
     
+    // 🚨 FILTRO: Ignorar broadcasts, newsletters, grupos e status
+    if (!senderJid) return;
+    if (senderJid.endsWith('@broadcast')) return;
+    if (senderJid.endsWith('@newsletter')) return;
+    if (senderJid.endsWith('@g.us')) return; // grupos
+    if (senderJid === 'status@broadcast') return;
+    
     // 🚨 1. VERIFICAÇÃO DE STATUS (COM CACHE)
     const aiShouldRespond = await checkAiStatus(senderJid);
 
@@ -421,8 +428,22 @@ const startSock = async (phoneOverride = null) => {
 
         // 4. RESPOSTA AO USUÁRIO (A função sendMessage agora é robusta)
         await sendMessage(senderJid, replyText);
-        logger.info(`✅ Resposta da IA enviada para ${senderJid}.`);
-
+        logger.info(`✅ Resposta da IA enviada para ${senderJid}`);
+            
+        // 5. NOTIFICAR LARAVEL (para o admin receber alerta da mensagem)
+        const text = incomingMessage.message?.conversation || 
+                     incomingMessage.message?.extendedTextMessage?.text || 
+                     '[Mensagem sem texto]';
+        const messageType = getContentType(incomingMessage.message) || 'unknown';
+        axios.post(WEBHOOK_URL, {
+            client_id: CLIENT_ID,
+            phone: senderJid.replace('@s.whatsapp.net', ''),
+            instance_phone: currentPhone,
+            message: text,
+            ai_disabled: false,
+            message_type: messageType
+        }).catch((e) => logger.warn('⚠️ Erro ao notificar Laravel após resposta IA:', e.message));
+    
     } catch (error) {
         logger.error(`❌ ERRO NO FLUXO DE ORQUESTRAÇÃO: ${error.message}`);
         try {
