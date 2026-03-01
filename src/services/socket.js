@@ -371,6 +371,8 @@ const startSock = async (phoneOverride = null) => {
     // 🔍 LOG DE DEBUG - SEMPRE LOGAR PRIMEIRO (antes de qualquer filtro)
     const senderJidRaw = incomingMessage.key.remoteJid;
     const fromMeRaw = incomingMessage.key.fromMe;
+    const messageId = incomingMessage.key.id;
+    
     logger.info(`📩 [DEBUG INICIAL] Mensagem upsert recebida`, {
       fromMe: fromMeRaw,
       remoteJid: senderJidRaw,
@@ -394,6 +396,8 @@ const startSock = async (phoneOverride = null) => {
       if (resolvedJid) {
         logger.info(`🗺️ [LID] Resolvido ${senderJidRaw} → ${resolvedJid}`);
         senderJid = resolvedJid;
+        // ✅ IMPORTANTE: Se já temos o JID resolvido, NÃO enviamos webhook com LID
+        // Isso evita duplicatas no banco (uma com LID, outra com JID)
       } else {
         // LID não mapeado ainda — processa assim mesmo, usando o LID como identificador
         // O número no banco será o LID até o contato ser mapeado
