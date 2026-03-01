@@ -360,12 +360,13 @@ const startSock = async (phoneOverride = null) => {
     
     const senderJid = incomingMessage.key.remoteJid;
     
-    // 🚨 FILTRO: Ignorar broadcasts, newsletters, grupos e status
+    // 🚨 FILTRO: Ignorar broadcasts, newsletters, grupos, status e linked devices
     if (!senderJid) return;
     if (senderJid.endsWith('@broadcast')) return;
     if (senderJid.endsWith('@newsletter')) return;
     if (senderJid.endsWith('@g.us')) return; // grupos
     if (senderJid === 'status@broadcast') return;
+    if (senderJid.endsWith('@lid')) return; // Linked Device ID — não é um número real
     
     // 🚨 1. VERIFICAÇÃO DE STATUS (COM CACHE)
     const aiShouldRespond = await checkAiStatus(senderJid);
@@ -382,9 +383,10 @@ const startSock = async (phoneOverride = null) => {
         const messageType = getContentType(incomingMessage.message) || 'unknown';
         
         // Webhook para LOG no Laravel
+        // Usa replace(/@.*$/, '') para remover qualquer sufixo (@s.whatsapp.net, @lid, @c.us, etc.)
         axios.post(WEBHOOK_URL, {
             client_id: CLIENT_ID, // ✅ NOVO: Multi-instância
-            phone: senderJid.replace("@s.whatsapp.net", ""),
+            phone: senderJid.replace(/@.*$/, ''),
             instance_phone: currentPhone,
             message: text,
             ai_disabled: true,
@@ -437,7 +439,7 @@ const startSock = async (phoneOverride = null) => {
         const messageType = getContentType(incomingMessage.message) || 'unknown';
         axios.post(WEBHOOK_URL, {
             client_id: CLIENT_ID,
-            phone: senderJid.replace('@s.whatsapp.net', ''),
+            phone: senderJid.replace(/@.*$/, ''),
             instance_phone: currentPhone,
             message: text,
             ai_disabled: false,
