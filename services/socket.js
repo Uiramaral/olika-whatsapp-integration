@@ -320,8 +320,19 @@ const startSock = async (phoneOverride = null) => {
   sock.ev.on("messages.upsert", async ({ messages }) => {
     const incomingMessage = messages[0];
     
+    // 🔍 LOG DE DEBUG - SEMPRE LOGAR PRIMEIRO
+    logger.info(`📩 Mensagem recebida: ${JSON.stringify({
+      fromMe: incomingMessage.key.fromMe,
+      remoteJid: incomingMessage.key.remoteJid,
+      hasMessage: !!incomingMessage.message,
+      messageType: incomingMessage.message ? Object.keys(incomingMessage.message)[0] : 'none'
+    })}`);
+    
     // Filtro essencial para não processar status ou mensagens próprias
-    if (incomingMessage.key.fromMe || !incomingMessage.message) return;
+    if (incomingMessage.key.fromMe || !incomingMessage.message) {
+      logger.info(`⏭️ Ignorada: fromMe=${incomingMessage.key.fromMe}, hasMessage=${!!incomingMessage.message}`);
+      return;
+    }
     
     const senderJid = incomingMessage.key.remoteJid;
     
@@ -347,6 +358,7 @@ const startSock = async (phoneOverride = null) => {
         const messageType = getContentType(incomingMessage.message) || 'unknown';
         
         // Webhook para LOG no Laravel
+        logger.info(`📡 Enviando webhook para Laravel (IA desabilitada): ${WEBHOOK_URL}`);
         axios.post(WEBHOOK_URL, {
             client_id: CLIENT_ID, // ✅ NOVO: Multi-instância
             phone: senderJid.replace("@s.whatsapp.net", ""),
@@ -354,7 +366,10 @@ const startSock = async (phoneOverride = null) => {
             message: text,
             ai_disabled: true,
             message_type: messageType 
-        }).catch((e) => logger.error('❌ Erro ao enviar webhook para Laravel:', e.message)); // Tratamento de erro do webhook
+        }).catch((e) => {
+          logger.error('❌ Erro ao enviar webhook para Laravel:', e.message);
+          logger.error('📋 Detalhes:', { url: WEBHOOK_URL, data: { phone: senderJid } });
+        });
         return; 
     }
     
