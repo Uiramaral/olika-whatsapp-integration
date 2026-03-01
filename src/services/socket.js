@@ -434,7 +434,8 @@ const startSock = async (phoneOverride = null) => {
       // Webhook para LOG no Laravel
       const webhookPayload = {
         client_id: CLIENT_ID,
-        phone: senderJid.replace(/@.*$/, ''),
+        phone: senderJid,
+        is_lid: senderJid.endsWith('@lid'),
         instance_phone: currentPhone,
         message: text,
         ai_disabled: true,
@@ -457,7 +458,8 @@ const startSock = async (phoneOverride = null) => {
     const messageTypePreview = getContentType(incomingMessage.message) || 'unknown';
     const webhookPayloadAi = {
       client_id: CLIENT_ID,
-      phone: senderJid.replace(/@.*$/, ''),
+      phone: senderJid,
+      is_lid: senderJid.endsWith('@lid'),
       instance_phone: currentPhone,
       message: textPreview,
       ai_disabled: false,
