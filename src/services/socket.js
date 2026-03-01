@@ -428,8 +428,9 @@ const startSock = async (phoneOverride = null) => {
         incomingMessage.message?.extendedTextMessage?.text ||
         '[Mensagem sem texto]';
 
-      // 💡 Adiciona o tipo de mensagem para o Laravel decidir a ação (ex: transferência humana para imagens/vídeos)
+      // 💡 Adiciona o tipo de mensagem e pushName para o Laravel
       const messageType = getContentType(incomingMessage.message) || 'unknown';
+      const pushName = incomingMessage.pushName || null;
 
       // Webhook para LOG no Laravel
       const webhookPayload = {
@@ -439,7 +440,9 @@ const startSock = async (phoneOverride = null) => {
         instance_phone: currentPhone,
         message: text,
         ai_disabled: true,
-        message_type: messageType
+        message_type: messageType,
+        push_name: pushName,
+        message_id: incomingMessage.key.id // ID único para deduplicação
       };
       logger.info(`📡 [WEBHOOK] Enviando para Laravel (IA desabilitada)`, { url: WEBHOOK_URL, phone: webhookPayload.phone });
       axios.post(WEBHOOK_URL, webhookPayload)
@@ -456,6 +459,7 @@ const startSock = async (phoneOverride = null) => {
       incomingMessage.message?.extendedTextMessage?.text ||
       '[Mensagem sem texto]';
     const messageTypePreview = getContentType(incomingMessage.message) || 'unknown';
+    const pushNamePreview = incomingMessage.pushName || null;
     const webhookPayloadAi = {
       client_id: CLIENT_ID,
       phone: senderJid,
@@ -463,7 +467,9 @@ const startSock = async (phoneOverride = null) => {
       instance_phone: currentPhone,
       message: textPreview,
       ai_disabled: false,
-      message_type: messageTypePreview
+      message_type: messageTypePreview,
+      push_name: pushNamePreview,
+      message_id: incomingMessage.key.id // ID único para deduplicação
     };
     logger.info(`📡 [WEBHOOK] Enviando para Laravel (IA habilitada - pré-processamento)`, { url: WEBHOOK_URL, phone: webhookPayloadAi.phone });
     axios.post(WEBHOOK_URL, webhookPayloadAi)
