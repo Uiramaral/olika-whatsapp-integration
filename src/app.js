@@ -800,6 +800,21 @@ const gracefulShutdown = async (signal) => {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
+// ============================================
+// HANDLERS DE ERROS NÃO TRATADOS (CRASH PREVENTION)
+// ============================================
+
+process.on('uncaughtException', (error) => {
+    logger.error('❌ UNCAUGHT EXCEPTION:', error);
+    logger.error('Stack:', error.stack);
+    // NAO faz exit imediatamente - tenta recuperar
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    logger.error('❌ UNHANDLED REJECTION reason:', reason);
+    // NAO faz exit imediatamente - tenta recuperar
+});
+
 // 🚀 CRÍTICO: Iniciar servidor HTTP IMEDIATAMENTE (independente do Baileys)
 // IMPORTANTE: Escutar em 0.0.0.0 para permitir acesso externo do Railway
 // Sem isso, o Railway não consegue acessar o container (erro "Application failed to respond")
