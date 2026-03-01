@@ -40,9 +40,9 @@ const AI_SYSTEM_PROMPT = process.env.AI_SYSTEM_PROMPT || "Você é um assistente
 const CUSTOMER_CONTEXT_URL = process.env.CUSTOMER_CONTEXT_URL;
 
 // Inicialização da OpenAI (para o GPT-5-nano ou modelo configurado)
-const openai = new OpenAI({ 
-    apiKey: process.env.OPENAI_API_KEY,
-    timeout: OPENAI_TIMEOUT
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  timeout: OPENAI_TIMEOUT
 });
 
 const msgRetryCounterCache = new NodeCache();
@@ -75,10 +75,10 @@ const saveConfig = (phone) => {
 };
 
 const removeConfig = () => {
-    if (fs.existsSync(CONFIG_FILE)) {
-        fs.unlinkSync(CONFIG_FILE);
-        console.log("🗑️ Configuração de número removida. STANDBY ATIVO.");
-    }
+  if (fs.existsSync(CONFIG_FILE)) {
+    fs.unlinkSync(CONFIG_FILE);
+    console.log("🗑️ Configuração de número removida. STANDBY ATIVO.");
+  }
 };
 
 /**
@@ -87,56 +87,56 @@ const removeConfig = () => {
  * @returns {Promise<string>} String formatada com contexto do cliente ou string vazia
  */
 const getCustomerContext = async (phoneNumber) => {
-    if (!CUSTOMER_CONTEXT_URL || !WH_API_TOKEN) {
-        logger.warn("❌ CUSTOMER_CONTEXT_URL não configurada. Contexto dinâmico desabilitado.");
-        return "";
+  if (!CUSTOMER_CONTEXT_URL || !WH_API_TOKEN) {
+    logger.warn("❌ CUSTOMER_CONTEXT_URL não configurada. Contexto dinâmico desabilitado.");
+    return "";
+  }
+
+  try {
+    const response = await axios.post(CUSTOMER_CONTEXT_URL, {
+      phone: phoneNumber
+    }, {
+      headers: {
+        'X-API-Token': WH_API_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      timeout: 3000 // Timeout mais curto para não atrasar a resposta
+    });
+
+    const context = response.data;
+
+    // Se não houver cliente, retornar vazio
+    if (!context.has_customer) {
+      return "";
     }
 
-    try {
-        const response = await axios.post(CUSTOMER_CONTEXT_URL, {
-            phone: phoneNumber
-        }, {
-            headers: {
-                'X-API-Token': WH_API_TOKEN,
-                'Content-Type': 'application/json'
-            },
-            timeout: 3000 // Timeout mais curto para não atrasar a resposta
-        });
+    // Formatar contexto de forma concisa
+    let contextString = `[CONTEXTO DO CLIENTE: Nome: ${context.name || 'Cliente'}`;
 
-        const context = response.data;
-        
-        // Se não houver cliente, retornar vazio
-        if (!context.has_customer) {
-            return "";
-        }
-
-        // Formatar contexto de forma concisa
-        let contextString = `[CONTEXTO DO CLIENTE: Nome: ${context.name || 'Cliente'}`;
-        
-        if (context.last_order) {
-            contextString += `, Último Pedido: #${context.last_order}`;
-            if (context.last_order_status) {
-                contextString += ` (Status: ${context.last_order_status})`;
-            }
-        }
-        
-        if (context.total_orders > 0) {
-            contextString += `, Total de Pedidos: ${context.total_orders}`;
-        }
-        
-        if (context.loyalty_points !== null && context.loyalty_points > 0) {
-            contextString += `, Pontos de Fidelidade: ${context.loyalty_points}`;
-        }
-        
-        contextString += "]";
-        
-        return contextString;
-        
-    } catch (error) {
-        logger.error(`❌ Falha ao buscar contexto do cliente no Laravel: ${error.message}`);
-        // Em caso de falha, continuar sem contexto (não bloquear a IA)
-        return "";
+    if (context.last_order) {
+      contextString += `, Último Pedido: #${context.last_order}`;
+      if (context.last_order_status) {
+        contextString += ` (Status: ${context.last_order_status})`;
+      }
     }
+
+    if (context.total_orders > 0) {
+      contextString += `, Total de Pedidos: ${context.total_orders}`;
+    }
+
+    if (context.loyalty_points !== null && context.loyalty_points > 0) {
+      contextString += `, Pontos de Fidelidade: ${context.loyalty_points}`;
+    }
+
+    contextString += "]";
+
+    return contextString;
+
+  } catch (error) {
+    logger.error(`❌ Falha ao buscar contexto do cliente no Laravel: ${error.message}`);
+    // Em caso de falha, continuar sem contexto (não bloquear a IA)
+    return "";
+  }
 };
 
 /**
@@ -145,52 +145,52 @@ const getCustomerContext = async (phoneNumber) => {
  * @returns {Promise<boolean>} True se a IA deve responder, False caso contrário.
  */
 const checkAiStatus = async (senderJid) => {
-    const cacheKey = `ai_status_${senderJid}`;
-    const cachedStatus = msgRetryCounterCache.get(cacheKey);
+  const cacheKey = `ai_status_${senderJid}`;
+  const cachedStatus = msgRetryCounterCache.get(cacheKey);
 
-    // 1. Cache Hit
-    if (cachedStatus !== undefined) {
-        logger.info(`⚡ Cache HIT para status da IA: ${senderJid} -> ${cachedStatus ? 'enabled' : 'disabled'}`);
-        return cachedStatus;
+  // 1. Cache Hit
+  if (cachedStatus !== undefined) {
+    logger.info(`⚡ Cache HIT para status da IA: ${senderJid} -> ${cachedStatus ? 'enabled' : 'disabled'}`);
+    return cachedStatus;
+  }
+
+  if (!AI_STATUS_URL || !WH_API_TOKEN) {
+    logger.warn("❌ Configurações AI_STATUS_URL/WH_API_TOKEN ausentes. IA Desabilitada.");
+    return false;
+  }
+
+  try {
+    const phoneNumber = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
+
+    // 2. Chamada POST para o Laravel
+    const response = await axios.post(AI_STATUS_URL, {
+      phone: phoneNumber
+    }, {
+      headers: {
+        'X-API-Token': WH_API_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      timeout: 5000
+    });
+
+    const isEnabled = response.data.status === 'enabled';
+
+    // 3. Cache Miss: Salva no cache antes de retornar
+    msgRetryCounterCache.set(cacheKey, isEnabled, STATUS_CACHE_TTL);
+
+    if (isEnabled) {
+      logger.info(`✅ IA habilitada para ${phoneNumber}`);
+    } else {
+      logger.info(`🚫 IA desabilitada para ${phoneNumber} (${response.data.reason || 'Global_Kill_Switch'})`);
     }
 
-    if (!AI_STATUS_URL || !WH_API_TOKEN) {
-        logger.warn("❌ Configurações AI_STATUS_URL/WH_API_TOKEN ausentes. IA Desabilitada.");
-        return false; 
-    }
+    return isEnabled;
 
-    try {
-        const phoneNumber = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
-
-        // 2. Chamada POST para o Laravel
-        const response = await axios.post(AI_STATUS_URL, {
-            phone: phoneNumber 
-        }, {
-            headers: {
-                'X-API-Token': WH_API_TOKEN,
-                'Content-Type': 'application/json'
-            },
-            timeout: 5000 
-        });
-
-        const isEnabled = response.data.status === 'enabled';
-        
-        // 3. Cache Miss: Salva no cache antes de retornar
-        msgRetryCounterCache.set(cacheKey, isEnabled, STATUS_CACHE_TTL);
-        
-        if (isEnabled) {
-            logger.info(`✅ IA habilitada para ${phoneNumber}`);
-        } else {
-            logger.info(`🚫 IA desabilitada para ${phoneNumber} (${response.data.reason || 'Global_Kill_Switch'})`);
-        }
-        
-        return isEnabled;
-        
-    } catch (error) {
-        logger.error(`❌ Falha na comunicação com o Laravel para status da IA: ${error.message}`);
-        // Política de segurança: Falha na comunicação = IA desligada.
-        return false;
-    }
+  } catch (error) {
+    logger.error(`❌ Falha na comunicação com o Laravel para status da IA: ${error.message}`);
+    // Política de segurança: Falha na comunicação = IA desligada.
+    return false;
+  }
 };
 
 // --- Função Core: Start do Socket ---
@@ -216,7 +216,7 @@ const startSock = async (phoneOverride = null) => {
   const { version } = await fetchLatestBaileysVersion();
   const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
-  if (globalSock) { try { globalSock.end(); } catch {} }
+  if (globalSock) { try { globalSock.end(); } catch { } }
 
   console.log(`🚀 Iniciando Socket para: ${currentPhone} (v${version.join(".")})`);
 
@@ -228,7 +228,7 @@ const startSock = async (phoneOverride = null) => {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, P({ level: "silent" })),
     },
-    browser: ["Ubuntu", "Chrome", "20.0.04"], 
+    browser: ["Ubuntu", "Chrome", "20.0.04"],
     markOnlineOnConnect: true,
     syncFullHistory: false,
     msgRetryCounterCache,
@@ -251,7 +251,7 @@ const startSock = async (phoneOverride = null) => {
           console.log(`📠 CÓDIGO (${currentPhone}): ${code?.match(/.{1,4}/g)?.join("-")}`);
           console.log(`#################################################\n`);
           global.currentPairingCode = code;
-          
+
           // 🆕 Timeout para limpar código expirado (5 minutos)
           setTimeout(() => {
             if (global.currentPairingCode === code && !isSocketConnected) {
@@ -259,9 +259,9 @@ const startSock = async (phoneOverride = null) => {
               global.currentPairingCode = null;
             }
           }, 5 * 60 * 1000);
-          
+
           break; // Sucesso, sai do loop
-        } catch (err) { 
+        } catch (err) {
           console.error(`❌ Erro ao pedir código (tentativa ${attempt}/3):`, err.message);
           if (attempt < 3) {
             console.log("🔄 Aguardando 2s antes de tentar novamente...");
@@ -284,20 +284,20 @@ const startSock = async (phoneOverride = null) => {
       isPairingInProgress = false; // 🆕 Pareamento concluído
       global.currentPairingCode = null;
       consecutiveFailures = 0; // 👈 ZERA O CONTADOR DE SUCESSO
-      
-      axios.post(WEBHOOK_URL, { 
+
+      axios.post(WEBHOOK_URL, {
         client_id: CLIENT_ID, // ✅ NOVO: Multi-instância
-        type: 'connection_update', 
-        instance_phone: currentPhone, 
-        status: 'CONNECTED' 
-      }).catch(() => {});
+        type: 'connection_update',
+        instance_phone: currentPhone,
+        status: 'CONNECTED'
+      }).catch(() => { });
     }
 
     if (connection === "close") {
       isSocketConnected = false;
       isConnecting = false; // 🆕 Libera flag
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      
+
       // 🆕 Não incrementa falhas durante pareamento inicial (códigos 515, 408)
       const pairingErrorCodes = [515, 408, 428]; // Timeout de pareamento
       if (isPairingInProgress && pairingErrorCodes.includes(reason)) {
@@ -309,40 +309,40 @@ const startSock = async (phoneOverride = null) => {
       console.log(`🔴 Desconectado (${reason}). Tentativa ${consecutiveFailures}/${MAX_FAILURES}.`);
 
       // 🔔 Webhook de Status
-      axios.post(WEBHOOK_URL, { 
+      axios.post(WEBHOOK_URL, {
         client_id: CLIENT_ID, // ✅ NOVO: Multi-instância
-        type: 'connection_update', 
-        instance_phone: currentPhone, 
-        status: 'DISCONNECTED' 
-      }).catch(() => {});
+        type: 'connection_update',
+        instance_phone: currentPhone,
+        status: 'DISCONNECTED'
+      }).catch(() => { });
 
 
       // 🚨 NÍVEL 2/3: LOGOUT FATAL OU LIMITE DE FALHAS EXCEDIDO
       if (reason === DisconnectReason.loggedOut || consecutiveFailures >= MAX_FAILURES) {
-        
+
         console.error("🚫 LIMITE DE FALHAS ATINGIDO ou LOGOUT FATAL. Entrando em modo STANDBY...");
-        
+
         // 1. Notifica o Laravel para exibir o erro ao usuário
-        axios.post(WEBHOOK_URL, { 
-            type: 'shutdown_alert', 
-            instance_phone: currentPhone, 
-            reason: 'PERSISTENT_FAILURE' 
-        }).catch(() => {});
+        axios.post(WEBHOOK_URL, {
+          type: 'shutdown_alert',
+          instance_phone: currentPhone,
+          reason: 'PERSISTENT_FAILURE'
+        }).catch(() => { });
 
         // 2. Limpeza de arquivos de sessão
         const sessionPath = path.join(BASE_AUTH_DIR, currentPhone);
         if (fs.existsSync(sessionPath)) {
-            fs.rmSync(sessionPath, { recursive: true, force: true });
+          fs.rmSync(sessionPath, { recursive: true, force: true });
         }
-        
+
         // 3. Limpa a configuração de número (FORÇA o Standby)
         removeConfig();
-        
+
         // 4. Desativa o socket global
         globalSock = null;
         global.currentPairingCode = null;
         consecutiveFailures = 0; // Zera para a próxima tentativa
-        
+
       } else {
         // NÍVEL 1: Falha Transitória (Tenta reconectar)
         console.log("🔄 Queda temporária. Tentando reconectar...");
@@ -354,106 +354,133 @@ const startSock = async (phoneOverride = null) => {
   // Eventos Mantidos - Orquestração Completa de IA
   sock.ev.on("messages.upsert", async ({ messages }) => {
     const incomingMessage = messages[0];
-    
+
+    // 🔍 LOG DE DEBUG - SEMPRE LOGAR PRIMEIRO (antes de qualquer filtro)
+    const senderJidRaw = incomingMessage.key.remoteJid;
+    const fromMeRaw = incomingMessage.key.fromMe;
+    logger.info(`📩 [DEBUG INICIAL] Mensagem upsert recebida`, {
+      fromMe: fromMeRaw,
+      remoteJid: senderJidRaw,
+      hasMessage: !!incomingMessage.message,
+      messageType: incomingMessage.message ? Object.keys(incomingMessage.message)[0] : 'none',
+      timestamp: new Date().toISOString()
+    });
+
     // Filtro essencial para não processar status ou mensagens próprias
-    if (incomingMessage.key.fromMe || !incomingMessage.message) return;
-    
-    const senderJid = incomingMessage.key.remoteJid;
-    
+    if (fromMeRaw || !incomingMessage.message) {
+      logger.info(`⏭️ [FILTRO 1] Ignorada: fromMe=${fromMeRaw}, hasMessage=${!!incomingMessage.message}`);
+      return;
+    }
+
+    const senderJid = senderJidRaw;
+
     // 🚨 FILTRO: Ignorar broadcasts, newsletters, grupos, status e linked devices
     if (!senderJid) return;
-    if (senderJid.endsWith('@broadcast')) return;
-    if (senderJid.endsWith('@newsletter')) return;
-    if (senderJid.endsWith('@g.us')) return; // grupos
-    if (senderJid === 'status@broadcast') return;
-    if (senderJid.endsWith('@lid')) return; // Linked Device ID — não é um número real
-    
+    if (senderJid.endsWith('@broadcast')) { logger.info(`⏭️ [FILTRO 2] Ignorado @broadcast: ${senderJid}`); return; }
+    if (senderJid.endsWith('@newsletter')) { logger.info(`⏭️ [FILTRO 2] Ignorado @newsletter: ${senderJid}`); return; }
+    if (senderJid.endsWith('@g.us')) { logger.info(`⏭️ [FILTRO 2] Ignorado @g.us (grupo): ${senderJid}`); return; }
+    if (senderJid === 'status@broadcast') { logger.info(`⏭️ [FILTRO 2] Ignorado status@broadcast`); return; }
+    if (senderJid.endsWith('@lid')) { logger.info(`⏭️ [FILTRO 2] Ignorado @lid (linked device): ${senderJid}`); return; }
+
+    // 🚨 LOG DO NÚMERO DO REMETENTE APÓS FILTROS
+    const senderPhone = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
+    logger.info(`📞 [FILTRO 3] Mensagem válida de número externo: ${senderPhone} (JID: ${senderJid})`);
+
     // 🚨 1. VERIFICAÇÃO DE STATUS (COM CACHE)
+    logger.info(`🔍 Verificando status da IA para ${senderPhone}...`);
     const aiShouldRespond = await checkAiStatus(senderJid);
 
     if (!aiShouldRespond) {
-        logger.info(`🚫 IA desabilitada para ${senderJid} (Controlado pelo Laravel). Ignorando.`);
-        // Se a IA está desligada, você pode adicionar um Webhook aqui para logar a mensagem no Laravel ou deixar que um atendente manual trate.
-        // Envia webhook apenas para LOG
-        const text = incomingMessage.message?.conversation || 
-                     incomingMessage.message?.extendedTextMessage?.text || 
-                     '[Mensagem sem texto]';
-        
-        // 💡 Adiciona o tipo de mensagem para o Laravel decidir a ação (ex: transferência humana para imagens/vídeos)
-        const messageType = getContentType(incomingMessage.message) || 'unknown';
-        
-        // Webhook para LOG no Laravel
-        // Usa replace(/@.*$/, '') para remover qualquer sufixo (@s.whatsapp.net, @lid, @c.us, etc.)
-        axios.post(WEBHOOK_URL, {
-            client_id: CLIENT_ID, // ✅ NOVO: Multi-instância
-            phone: senderJid.replace(/@.*$/, ''),
-            instance_phone: currentPhone,
-            message: text,
-            ai_disabled: true,
-            message_type: messageType 
-        }).catch((e) => logger.error('❌ Erro ao enviar webhook para Laravel:', e.message)); // Tratamento de erro do webhook
-        return; 
+      logger.info(`🚫 IA desabilitada para ${senderJid} (Controlado pelo Laravel). Ignorando.`);
+      // Se a IA está desligada, você pode adicionar um Webhook aqui para logar a mensagem no Laravel ou deixar que um atendente manual trate.
+      // Envia webhook apenas para LOG
+      const text = incomingMessage.message?.conversation ||
+        incomingMessage.message?.extendedTextMessage?.text ||
+        '[Mensagem sem texto]';
+
+      // 💡 Adiciona o tipo de mensagem para o Laravel decidir a ação (ex: transferência humana para imagens/vídeos)
+      const messageType = getContentType(incomingMessage.message) || 'unknown';
+
+      // Webhook para LOG no Laravel
+      const webhookPayload = {
+        client_id: CLIENT_ID,
+        phone: senderJid.replace(/@.*$/, ''),
+        instance_phone: currentPhone,
+        message: text,
+        ai_disabled: true,
+        message_type: messageType
+      };
+      logger.info(`📡 [WEBHOOK] Enviando para Laravel (IA desabilitada)`, { url: WEBHOOK_URL, phone: webhookPayload.phone });
+      axios.post(WEBHOOK_URL, webhookPayload)
+        .then(() => logger.info(`✅ [WEBHOOK] Enviado com sucesso para Laravel`))
+        .catch((e) => logger.error('❌ [WEBHOOK] Erro ao enviar para Laravel:', e.message));
+      return;
     }
-    
+
     // 2. PROCESSO DE ORQUESTRAÇÃO DE IA
     logger.info(`✅ IA habilitada para ${senderJid}. Iniciando Orquestração de IA...`);
-    
+
+    // 🚨 Notificar Laravel da mensagem com IA ativa (para salvar no banco ANTES da resposta)
+    const textPreview = incomingMessage.message?.conversation ||
+      incomingMessage.message?.extendedTextMessage?.text ||
+      '[Mensagem sem texto]';
+    const messageTypePreview = getContentType(incomingMessage.message) || 'unknown';
+    const webhookPayloadAi = {
+      client_id: CLIENT_ID,
+      phone: senderJid.replace(/@.*$/, ''),
+      instance_phone: currentPhone,
+      message: textPreview,
+      ai_disabled: false,
+      message_type: messageTypePreview
+    };
+    logger.info(`📡 [WEBHOOK] Enviando para Laravel (IA habilitada - pré-processamento)`, { url: WEBHOOK_URL, phone: webhookPayloadAi.phone });
+    axios.post(WEBHOOK_URL, webhookPayloadAi)
+      .then(() => logger.info(`✅ [WEBHOOK] Pré-notificação enviada com sucesso para Laravel`))
+      .catch((e) => logger.warn('⚠️ [WEBHOOK] Erro ao pré-notificar Laravel:', e.message));
+
     try {
-        // Extrai dados e processa áudio/pdf (chamada condicional a Whisper)
-        const { payload } = await extractDataForAI(incomingMessage);
-        
-        // 🎭 CONTEXTO ESTÁTICO: Persona da IA (da variável de ambiente)
-        const systemPrompt = AI_SYSTEM_PROMPT;
-        
-        // 📋 CONTEXTO DINÂMICO: Busca dados do cliente no Laravel
-        const phoneNumber = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
-        const dynamicContext = await getCustomerContext(phoneNumber);
-        
-        // Construir prompt do usuário com contexto dinâmico
-        let finalUserPrompt = payload;
-        if (dynamicContext) {
-            finalUserPrompt = `${dynamicContext}\n\n[Mensagem do Usuário]: ${payload}`;
-        }
-        
-        const contentForAI = [
-            { role: 'system', content: systemPrompt }, // Persona da IA
-            { role: 'user', content: finalUserPrompt } // Contexto + Mensagem do usuário
-        ];
-        
-        // 3. CHAMADA FINAL PARA O GPT (modelo configurado)
-        const response = await openai.chat.completions.create({
-            model: OPENAI_MODEL,
-            messages: contentForAI,
-        });
+      // Extrai dados e processa áudio/pdf (chamada condicional a Whisper)
+      const { payload } = await extractDataForAI(incomingMessage);
 
-        const replyText = response.choices[0].message.content;
+      // 🎭 CONTEXTO ESTÁTICO: Persona da IA (da variável de ambiente)
+      const systemPrompt = AI_SYSTEM_PROMPT;
 
-        // 4. RESPOSTA AO USUÁRIO (A função sendMessage agora é robusta)
-        await sendMessage(senderJid, replyText);
-        logger.info(`✅ Resposta da IA enviada para ${senderJid}`);
-            
-        // 5. NOTIFICAR LARAVEL (para o admin receber alerta da mensagem)
-        const text = incomingMessage.message?.conversation || 
-                     incomingMessage.message?.extendedTextMessage?.text || 
-                     '[Mensagem sem texto]';
-        const messageType = getContentType(incomingMessage.message) || 'unknown';
-        axios.post(WEBHOOK_URL, {
-            client_id: CLIENT_ID,
-            phone: senderJid.replace(/@.*$/, ''),
-            instance_phone: currentPhone,
-            message: text,
-            ai_disabled: false,
-            message_type: messageType
-        }).catch((e) => logger.warn('⚠️ Erro ao notificar Laravel após resposta IA:', e.message));
-    
+      // 📋 CONTEXTO DINÂMICO: Busca dados do cliente no Laravel
+      const phoneNumber = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
+      const dynamicContext = await getCustomerContext(phoneNumber);
+
+      // Construir prompt do usuário com contexto dinâmico
+      let finalUserPrompt = payload;
+      if (dynamicContext) {
+        finalUserPrompt = `${dynamicContext}\n\n[Mensagem do Usuário]: ${payload}`;
+      }
+
+      const contentForAI = [
+        { role: 'system', content: systemPrompt }, // Persona da IA
+        { role: 'user', content: finalUserPrompt } // Contexto + Mensagem do usuário
+      ];
+
+      // 3. CHAMADA FINAL PARA O GPT (modelo configurado)
+      const response = await openai.chat.completions.create({
+        model: OPENAI_MODEL,
+        messages: contentForAI,
+      });
+
+      const replyText = response.choices[0].message.content;
+
+      // 4. RESPOSTA AO USUÁRIO (A função sendMessage agora é robusta)
+      await sendMessage(senderJid, replyText);
+      logger.info(`✅ Resposta da IA enviada para ${senderJid}`);
+      // (webhook já enviado antes do try, não duplicar)
+
     } catch (error) {
-        logger.error(`❌ ERRO NO FLUXO DE ORQUESTRAÇÃO: ${error.message}`);
-        try {
-            // A chamada sendMessage é mais robusta, mas ainda pode lançar erro.
-            await sendMessage(senderJid, "Desculpe, a análise de IA falhou. Por favor, tente novamente mais tarde.");
-        } catch (sendError) {
-            logger.error(`❌ Erro ao enviar mensagem de erro: ${sendError.message}`);
-        }
+      logger.error(`❌ ERRO NO FLUXO DE ORQUESTRAÇÃO: ${error.message}`);
+      try {
+        // A chamada sendMessage é mais robusta, mas ainda pode lançar erro.
+        await sendMessage(senderJid, "Desculpe, a análise de IA falhou. Por favor, tente novamente mais tarde.");
+      } catch (sendError) {
+        logger.error(`❌ Erro ao enviar mensagem de erro: ${sendError.message}`);
+      }
     }
   });
   sock.ev.on("creds.update", saveCreds);
@@ -465,9 +492,9 @@ const startSock = async (phoneOverride = null) => {
 // --- Funções de Controle Exportadas ---
 const forceLogout = async () => {
   console.log("🚨 RESET MANUAL INICIADO!");
-  
+
   if (globalSock) {
-    try { globalSock.end(); } catch {}
+    try { globalSock.end(); } catch { }
     globalSock = null;
     isSocketConnected = false;
   }
@@ -481,7 +508,7 @@ const forceLogout = async () => {
   }
 
   removeConfig(); // APAGA A CONFIG DE NÚMERO
-  
+
   // Não chama startSock() aqui, deixa o sistema em STANDBY
   return { success: true, message: "Sessão resetada. Chame /connect para novo pareamento." };
 };
@@ -489,28 +516,28 @@ const forceLogout = async () => {
 // Desconecta a instância sem deletar credenciais
 const disconnectSock = async () => {
   console.log("🔴 DESCONEXÃO INICIADA!");
-  
+
   if (!globalSock) {
     console.warn('⚠️  Socket já está desconectado');
     return { success: true, message: 'Já desconectado' };
   }
-  
+
   try {
     // 1. Fazer logout para invalidar a sessão no WhatsApp
     await globalSock.logout();
     console.log('✅ Logout realizado');
-    
+
     // 2. Fechar conexão
     if (globalSock.ws) {
       globalSock.ws.close();
     }
     globalSock.end();
-    
+
     // 3. Limpar referência global (mas NÃO deletar credenciais)
     globalSock = null;
     isSocketConnected = false;
     console.log('✅ Instância desconectada completamente');
-    
+
     return { success: true, message: 'Desconectado com sucesso' };
   } catch (error) {
     console.error(`❌ Erro ao desconectar: ${error.message}`);
@@ -522,34 +549,43 @@ const disconnectSock = async () => {
 };
 
 // Inicialização: Tenta startar, se não tiver config, entra em STANDBY
-(async () => { 
-    setTimeout(async () => {
-        await startSock(); 
-    }, 500); 
+(async () => {
+  setTimeout(async () => {
+    await startSock();
+  }, 500);
 })();
 
 // --- Exportações ---
 const sendMessage = async (phone, message) => {
-    if (!globalSock || !isSocketConnected) throw new Error("Offline");
-    
-    // 🚨 AJUSTE DE ROBUSTEZ: Captura erros de envio
-    try {
-        const cleanPhone = phone.replace(/\D/g, "");
-        const checkJid = cleanPhone.includes("@s.whatsapp.net") ? cleanPhone : `${cleanPhone}@s.whatsapp.net`;
-        const [result] = await globalSock.onWhatsApp(checkJid);
-        
-        if (!result?.exists) throw new Error("Número inválido no WhatsApp");
-        
-        const sent = await globalSock.sendMessage(result.jid, { text: message });
-        
-        return { success: true, messageId: sent.key.id };
-    } catch (e) {
-        // Loga o erro, mas permite que o fluxo externo continue sem quebrar o listener
-        logger.error(`❌ ERRO ao enviar mensagem para ${phone}: ${e.message}`);
-        throw new Error(`Falha no envio da mensagem: ${e.message}`); 
-    }
+  if (!globalSock || !isSocketConnected) throw new Error("Offline");
+
+  // 🚨 AJUSTE DE ROBUSTEZ: Captura erros de envio
+  try {
+    const cleanPhone = phone.replace(/\D/g, "");
+    const checkJid = cleanPhone.includes("@s.whatsapp.net") ? cleanPhone : `${cleanPhone}@s.whatsapp.net`;
+    const [result] = await globalSock.onWhatsApp(checkJid);
+
+    if (!result?.exists) throw new Error("Número inválido no WhatsApp");
+
+    const sent = await globalSock.sendMessage(result.jid, { text: message });
+
+    return { success: true, messageId: sent.key.id };
+  } catch (e) {
+    // Loga o erro, mas permite que o fluxo externo continue sem quebrar o listener
+    logger.error(`❌ ERRO ao enviar mensagem para ${phone}: ${e.message}`);
+    throw new Error(`Falha no envio da mensagem: ${e.message}`);
+  }
 };
 const isConnected = () => isSocketConnected;
 const getCurrentPhone = () => currentPhone;
+
+// 🛡️ Handlers globais para prevenir crash loops no Railway
+process.on('uncaughtException', (error) => {
+  logger.error('❌ UNCAUGHT EXCEPTION (socket.js):', { message: error.message, stack: error.stack });
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('❌ UNHANDLED REJECTION (socket.js):', { reason: String(reason) });
+});
 
 module.exports = { sendMessage, startSock, isConnected, getCurrentPhone, forceLogout, disconnectSock };
