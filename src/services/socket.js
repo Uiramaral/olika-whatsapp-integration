@@ -232,9 +232,16 @@ const startSock = async (phoneOverride = null) => {
     markOnlineOnConnect: true,
     syncFullHistory: false,
     msgRetryCounterCache,
-    connectTimeoutMs: 90000, // Aumentado de 60s para 90s
-    retryRequestDelayMs: 2000, // Delay entre retentativas
-    defaultQueryTimeoutMs: 60000, // Timeout para queries
+    connectTimeoutMs: 90000,
+    retryRequestDelayMs: 2000,
+    defaultQueryTimeoutMs: 60000,
+    // 🔑 CRÍTICO: Sem este handler, o Baileys descarta silenciosamente mensagens
+    // de números externos que precisam de contexto para descriptografia.
+    // Retorna undefined (não encontrado) é suficiente — o Baileys vai retentar.
+    getMessage: async (key) => {
+      logger.info(`🔑 [getMessage] Solicitado para: ${key.remoteJid} id=${key.id}`);
+      return undefined;
+    },
   });
 
   // Geração do Código de Pareamento
