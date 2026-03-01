@@ -51,13 +51,19 @@ let globalSock = null;
 let isSocketConnected = false;
 let currentPhone = null;
 
-// 🚨 Contador de falhas e limite
+// 🔥 Contador de falhas e limite
 let consecutiveFailures = 0;
-const MAX_FAILURES = 5; // Aumentado de 3 para 5
+const MAX_FAILURES = 5;
 
 // 🆕 Flag para evitar reconexões duplicadas e controlar estado de pareamento
 let isConnecting = false;
-let isPairingInProgress = false; // Não conta falhas durante pareamento 
+let isPairingInProgress = false;
+
+// 🗺️ Mapa LID → JID real (protocolo WhatsApp LID)
+// O WhatsApp usa LIDs (@lid) em vez de JIDs (@s.whatsapp.net) para remetentes externos
+// Este mapa é populado via contacts.upsert e usado para resolver o número real
+const lidToJidMap = new Map();
+
 
 // --- Persistência de Configuração ---
 const loadConfig = () => {
@@ -379,19 +385,36 @@ const startSock = async (phoneOverride = null) => {
       return;
     }
 
-    const senderJid = senderJidRaw;
+    // 🗺️ RESOLUÇÃO DE LID: O WhatsApp usa LIDs no protocolo multi-device
+    // Mensagens de números externos chegam com @lid em vez de @s.whatsapp.net
+    // Tentamos resolver via mapa; se não encontrado, processamos assim mesmo com log
+    let senderJid = senderJidRaw;
+    if (senderJidRaw && senderJidRaw.endsWith('@lid')) {
+      const resolvedJid = lidToJidMap.get(senderJidRaw);
+      if (resolvedJid) {
+        logger.info(`🗺️ [LID] Resolvido ${senderJidRaw} → ${resolvedJid}`);
+        senderJid = resolvedJid;
+      } else {
+        // LID não mapeado ainda — processa assim mesmo, usando o LID como identificador
+        // O número no banco será o LID até o contato ser mapeado
+        const pushName = incomingMessage.pushName || 'Desconhecido';
+        logger.warn(`⚠️ [LID] Não mapeado: ${senderJidRaw} (pushName=${pushName}). Processando com LID.`);
+        senderJid = senderJidRaw; // mantém o @lid
+      }
+    }
 
-    // 🚨 FILTRO: Ignorar broadcasts, newsletters, grupos, status e linked devices
+    // 🚨 FILTRO: Ignorar broadcasts, newsletters, grupos e status
+    // @lid NÃO é mais filtrado — é resolvido acima para o JID real
     if (!senderJid) return;
     if (senderJid.endsWith('@broadcast')) { logger.info(`⏭️ [FILTRO 2] Ignorado @broadcast: ${senderJid}`); return; }
     if (senderJid.endsWith('@newsletter')) { logger.info(`⏭️ [FILTRO 2] Ignorado @newsletter: ${senderJid}`); return; }
     if (senderJid.endsWith('@g.us')) { logger.info(`⏭️ [FILTRO 2] Ignorado @g.us (grupo): ${senderJid}`); return; }
     if (senderJid === 'status@broadcast') { logger.info(`⏭️ [FILTRO 2] Ignorado status@broadcast`); return; }
-    if (senderJid.endsWith('@lid')) { logger.info(`⏭️ [FILTRO 2] Ignorado @lid (linked device): ${senderJid}`); return; }
 
     // 🚨 LOG DO NÚMERO DO REMETENTE APÓS FILTROS
     const senderPhone = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
-    logger.info(`📞 [FILTRO 3] Mensagem válida de número externo: ${senderPhone} (JID: ${senderJid})`);
+    logger.info(`📞 [FILTRO 3] Mensagem válida de: ${senderPhone} (JID: ${senderJid})`);
+
 
     // 🚨 1. VERIFICAÇÃO DE STATUS (COM CACHE)
     logger.info(`🔍 Verificando status da IA para ${senderPhone}...`);
@@ -491,6 +514,24 @@ const startSock = async (phoneOverride = null) => {
     }
   });
   sock.ev.on("creds.update", saveCreds);
+
+  // 🗺️ Listener para popular o mapa LID → JID real
+  // O WhatsApp usa LIDs no protocolo multi-device. Quando contatos chegam,
+  // guardamos o mapeamento LID → JID para resolver mensagens @lid.
+  sock.ev.on('contacts.upsert', (contacts) => {
+    let novos = 0;
+    for (const contact of contacts) {
+      if (contact.lid && contact.id) {
+        const lidKey = contact.lid.endsWith('@lid') ? contact.lid : `${contact.lid}@lid`;
+        const jidValue = contact.id.endsWith('@s.whatsapp.net') ? contact.id : `${contact.id}@s.whatsapp.net`;
+        lidToJidMap.set(lidKey, jidValue);
+        novos++;
+      }
+    }
+    if (novos > 0) {
+      logger.info(`🗺️ [LID MAP] ${novos} contato(s) mapeados. Total no mapa: ${lidToJidMap.size}`);
+    }
+  });
 
   globalSock = sock;
   return sock;
