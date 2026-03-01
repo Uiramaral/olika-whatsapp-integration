@@ -321,20 +321,22 @@ const startSock = async (phoneOverride = null) => {
     const incomingMessage = messages[0];
     
     // 🔍 LOG DE DEBUG - SEMPRE LOGAR PRIMEIRO
-    logger.info(`📩 Mensagem recebida: ${JSON.stringify({
-      fromMe: incomingMessage.key.fromMe,
-      remoteJid: incomingMessage.key.remoteJid,
+    const senderJid = incomingMessage.key.remoteJid;
+    const fromMe = incomingMessage.key.fromMe;
+    
+    logger.info(`📩 [DEBUG INICIAL] Mensagem upsert recebida`, {
+      fromMe: fromMe,
+      remoteJid: senderJid,
       hasMessage: !!incomingMessage.message,
-      messageType: incomingMessage.message ? Object.keys(incomingMessage.message)[0] : 'none'
-    })}`);
+      messageType: incomingMessage.message ? Object.keys(incomingMessage.message)[0] : 'none',
+      timestamp: new Date().toISOString()
+    });
     
     // Filtro essencial para não processar status ou mensagens próprias
-    if (incomingMessage.key.fromMe || !incomingMessage.message) {
-      logger.info(`⏭️ Ignorada: fromMe=${incomingMessage.key.fromMe}, hasMessage=${!!incomingMessage.message}`);
+    if (fromMe || !incomingMessage.message) {
+      logger.info(`⏭️ [FILTRO 1] Ignorada: fromMe=${fromMe}, hasMessage=${!!incomingMessage.message}`);
       return;
     }
-    
-    const senderJid = incomingMessage.key.remoteJid;
     
     // 🚨 FILTRO: Ignorar broadcasts, newsletters, grupos e status
     if (!senderJid) return;
@@ -343,7 +345,12 @@ const startSock = async (phoneOverride = null) => {
     if (senderJid.endsWith('@g.us')) return; // grupos
     if (senderJid === 'status@broadcast') return;
     
+    // 🚨 LOG DO NÚMERO DO REMETENTE
+    const senderPhone = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
+    logger.info(`📞 [FILTRO 2] Mensagem válida de: ${senderPhone}`);
+    
     // 🚨 1. VERIFICAÇÃO DE STATUS (COM CACHE)
+    logger.info(`🔍 Verificando status da IA para ${senderPhone}...`);
     const aiShouldRespond = await checkAiStatus(senderJid);
 
     if (!aiShouldRespond) {
