@@ -53,7 +53,7 @@ let currentPhone = null;
 
 // 🔥 Contador de falhas e limite
 let consecutiveFailures = 0;
-const MAX_FAILURES = 5;
+const MAX_FAILURES = 3;
 
 // 🆕 Flag para evitar reconexões duplicadas e controlar estado de pareamento
 let isConnecting = false;
@@ -319,7 +319,7 @@ const startSock = async (phoneOverride = null) => {
       } else {
         consecutiveFailures++; // 👈 INCREMENTA A FALHA apenas se não for pareamento
       }
-      console.log(`🔴 Desconectado (${reason}). Tentativa ${consecutiveFailures}/${MAX_FAILURES}.`);
+      console.log(`🔴 Desconectado (${reason}). Tentativa ${consecutiveFailures}/3.`);
 
       // 🔔 Webhook de Status
       axios.post(WEBHOOK_URL, {
@@ -329,11 +329,10 @@ const startSock = async (phoneOverride = null) => {
         status: 'DISCONNECTED'
       }).catch(() => { });
 
+      // 🚨 NÍVEL 2/3: LOGOUT FATAL OU LIMITE DE FALHAS EXCEDIDO (3 tentativas consecutivas)
+      if (reason === DisconnectReason.loggedOut || consecutiveFailures >= 3) {
 
-      // 🚨 NÍVEL 2/3: LOGOUT FATAL OU LIMITE DE FALHAS EXCEDIDO
-      if (reason === DisconnectReason.loggedOut || consecutiveFailures >= MAX_FAILURES) {
-
-        console.error("🚫 LIMITE DE FALHAS ATINGIDO ou LOGOUT FATAL. Entrando em modo STANDBY...");
+        console.error("🚨 LIMITE DE FALHAS ATINGIDO ou LOGOUT FATAL. Deletando credenciais corrompidas...");
 
         // 1. Notifica o Laravel para exibir o erro ao usuário
         axios.post(WEBHOOK_URL, {
@@ -345,16 +344,35 @@ const startSock = async (phoneOverride = null) => {
         // 2. Limpeza de arquivos de sessão
         const sessionPath = path.join(BASE_AUTH_DIR, currentPhone);
         if (fs.existsSync(sessionPath)) {
-          fs.rmSync(sessionPath, { recursive: true, force: true });
+          try {
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+            console.log("🗑️ Pasta de autenticação corrompida deletada com sucesso.");
+          } catch (fsErr) {
+            console.error("Erro ao deletar pasta de sessão:", fsErr.message);
+          }
         }
 
-        // 3. Limpa a configuração de número (FORÇA o Standby)
-        removeConfig();
+        // Guardar o telefone antes de limpar referências
+        const phoneToRestart = currentPhone;
 
-        // 4. Desativa o socket global
+        // 3. Desativa o socket global
         globalSock = null;
         global.currentPairingCode = null;
         consecutiveFailures = 0; // Zera para a próxima tentativa
+        isConnecting = false;
+        isPairingInProgress = false;
+
+        if (reason === DisconnectReason.loggedOut) {
+          // Se foi logout manual pelo app do celular, remove config e entra em STANDBY
+          console.log("🚫 Logout manual detectado. Removendo configuração e entrando em modo STANDBY.");
+          removeConfig();
+        } else {
+          // Se foi loop de erro (ex: Bad MAC), reinicia automaticamente para novo pareamento
+          console.log(`🔄 Reiniciando socket para ${phoneToRestart} em 5 segundos para novo pareamento...`);
+          setTimeout(() => {
+            startSock(phoneToRestart);
+          }, 5000);
+        }
 
       } else {
         // NÍVEL 1: Falha Transitória (Tenta reconectar)
@@ -398,6 +416,23 @@ const startSock = async (phoneOverride = null) => {
         senderJid = resolvedJid;
         // ✅ IMPORTANTE: Se já temos o JID resolvido, NÃO enviamos webhook com LID
         // Isso evita duplicatas no banco (uma com LID, outra com JID)
+        
+        // 🚨 AJUSTE DE TOKEN DEDICADO NO SYNC-LID EXPRESS
+        const lidPuro = senderJidRaw.split('@')[0];
+        const cleanPhonePuro = resolvedJid.split('@')[0];
+        const syncLidUrl = WEBHOOK_URL.replace('/webhook', '/sync-lid');
+        
+        logger.info(`🗺️ [LID Sync Express] Sincronizando vínculo: LID ${lidPuro} <-> Telefone ${cleanPhonePuro}`);
+        axios.post(syncLidUrl, {
+          client_id: CLIENT_ID,
+          lid: lidPuro,
+          phone: cleanPhonePuro,
+          token: 'olika_socket_secure_token_55b91cf8e2c0e81b' // ✅ Injeta no corpo
+        }, {
+          headers: {
+            'X-API-Token': WH_API_TOKEN || 'olika_socket_secure_token_55b91cf8e2c0e81b' // ✅ Injeta no Header
+          }
+        }).catch((e) => logger.error(`❌ [LID Sync Express] Erro ao sincronizar LID: ${e.message}`));
       } else {
         // LID não mapeado ainda — processa assim mesmo, usando o LID como identificador
         // O número no banco será o LID até o contato ser mapeado
@@ -418,6 +453,87 @@ const startSock = async (phoneOverride = null) => {
     // 🚨 LOG DO NÚMERO DO REMETENTE APÓS FILTROS
     const senderPhone = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
     logger.info(`📞 [FILTRO 3] Mensagem válida de: ${senderPhone} (JID: ${senderJid})`);
+
+    // 🚨 INTEGRAÇÃO COM N8N: Se N8N_WEBHOOK_URL estiver configurada no Railway (ou via fallback), desvia o fluxo para o n8n
+    const n8nUrl = process.env.N8N_WEBHOOK_URL || "https://n8n-production-e19d.up.railway.app/webhook-test/d10aac8e-455d-4345-94a3-54a33bec56ff";
+    if (n8nUrl) {
+      logger.info(`📡 [N8N] Encaminhando mensagem de ${senderPhone} para o n8n...`);
+      
+      const deQuem = senderJid ? senderJid.split('@')[0] : '';
+      const textoMensagem = incomingMessage.message?.conversation || 
+                            incomingMessage.message?.extendedTextMessage?.text || 
+                            '[Mídia/Outro]';
+        
+      const webhookPayload = {
+        client_id: CLIENT_ID, // Mantido para referência interna
+        instance_phone: currentPhone,
+        number: deQuem, // Apenas o número de telefone puro (ex: 5571999999999)
+        jid: senderJid, // JID completo caso o n8n precise de @s.whatsapp.net ou @lid
+        text: textoMensagem,
+        pushName: incomingMessage.pushName || 'Desconhecido',
+        message_id: incomingMessage.key.id,
+        raw_message: incomingMessage // Mantido para o n8n poder acessar botões, reações, etc. se necessário
+      };
+
+      // Dispara para o n8n
+      axios.post(n8nUrl, webhookPayload)
+        .then(() => logger.info(`🚀 [n8n Webhook] Dados enviados com sucesso para o n8n!`))
+        .catch((e) => {
+          const status = e.response?.status;
+          const statusText = e.response?.statusText;
+          const responseData = e.response?.data ? JSON.stringify(e.response.data) : '';
+          
+          if (status === 404) {
+            logger.warn(`⚠️ [n8n Webhook] Erro 404: O n8n não está ouvindo eventos de teste no momento. No painel do n8n, clique em "Listen for test event" (ou "Test step") antes de enviar a mensagem, ou ative (Active) o workflow de produção.`);
+          } else {
+            logger.error(`❌ [n8n Webhook] Erro ao enviar para o n8n. Status: ${status || 'N/A'} (${statusText || 'N/A'}). Detalhes: ${responseData || e.message}`);
+          }
+        });
+    }
+
+    // 🚨 NOVO: Atualização automática de nome se o pushName for válido e o banco tiver "Cliente"
+    const pushNameAtual = incomingMessage.pushName || '';
+
+    // Lista de nomes genéricos que queremos substituir
+    const nomesGenericos = ['Cliente', 'Desconhecido', 'unknown', '', null];
+
+    // Se o pushName que veio do WhatsApp for válido (não for genérico)
+    if (!nomesGenericos.includes(pushNameAtual)) {
+      
+      // 📋 Busca o contexto atual do cliente para ver o que está salvo no banco
+      getCustomerContext(senderPhone).then(async (dynamicContext) => {
+        
+        // Verifica se o contexto atual diz que o nome do banco é genérico ou se não tem contexto
+        const bancoTemNomeGenerico = nomesGenericos.some(generico => 
+          dynamicContext.includes(`Nome: ${generico}`)
+        ) || dynamicContext === ""; // Se dynamicContext for vazio, o cliente é novo no banco
+
+        if (bancoTemNomeGenerico) {
+          logger.info(`👤 [Auto-Name Update] Nome no banco é genérico, mas WhatsApp trouxe: "${pushNameAtual}". Atualizando Laravel...`);
+          
+          try {
+            const updateNameUrl = WEBHOOK_URL.replace('/webhook', '/update-name');
+            const cleanIdentifier = senderJid.split('@')[0];
+
+            // Dispara a atualização direto para o Laravel de forma silenciosa
+            await axios.post(updateNameUrl, {
+              number: cleanIdentifier,
+              name: pushNameAtual,
+              token: WH_API_TOKEN || 'olika_socket_secure_token_55b91cf8e2c0e81b'
+            }, {
+              headers: {
+                'X-API-Token': WH_API_TOKEN || 'olika_socket_secure_token_55b91cf8e2c0e81b'
+              },
+              timeout: 3000
+            });
+            
+            logger.info(`✅ [Auto-Name Update] Nome do cliente "${pushNameAtual}" atualizado com sucesso no Laravel!`);
+          } catch (err) {
+            logger.error(`❌ [Auto-Name Update] Falha ao atualizar nome no Laravel: ${err.message}`);
+          }
+        }
+      }).catch((err) => logger.error(`❌ [Auto-Name Update] Erro ao checar contexto: ${err.message}`));
+    }
 
 
     // 🚨 1. VERIFICAÇÃO DE STATUS (COM CACHE)
@@ -532,16 +648,36 @@ const startSock = async (phoneOverride = null) => {
   // guardamos o mapeamento LID → JID para resolver mensagens @lid.
   sock.ev.on('contacts.upsert', (contacts) => {
     let novos = 0;
+    const syncLidUrl = WEBHOOK_URL.replace('/webhook', '/sync-lid');
+    
     for (const contact of contacts) {
       if (contact.lid && contact.id) {
         const lidKey = contact.lid.endsWith('@lid') ? contact.lid : `${contact.lid}@lid`;
         const jidValue = contact.id.endsWith('@s.whatsapp.net') ? contact.id : `${contact.id}@s.whatsapp.net`;
-        lidToJidMap.set(lidKey, jidValue);
-        novos++;
+        
+        if (!lidToJidMap.has(lidKey)) {
+          lidToJidMap.set(lidKey, jidValue);
+          novos++;
+          
+          // 🚨 AJUSTE DE TOKEN DEDICADO NO HANDLE CONTACTS GERAL
+          const lidPuro = lidKey.split('@')[0];
+          const phonePuro = jidValue.split('@')[0];
+          
+          axios.post(syncLidUrl, {
+            client_id: CLIENT_ID,
+            lid: lidPuro,
+            phone: phonePuro,
+            token: 'olika_socket_secure_token_55b91cf8e2c0e81b' // ✅ Injeta no corpo
+          }, {
+            headers: {
+              'X-API-Token': WH_API_TOKEN || 'olika_socket_secure_token_55b91cf8e2c0e81b' // ✅ Injeta no Header
+            }
+          }).catch(() => {});
+        }
       }
     }
     if (novos > 0) {
-      logger.info(`🗺️ [LID MAP] ${novos} contato(s) mapeados. Total no mapa: ${lidToJidMap.size}`);
+      logger.info(`🗺️ [LID MAP & Sync] ${novos} contato(s) mapeados e sincronizados com o Laravel. Total no mapa: ${lidToJidMap.size}`);
     }
   });
 

@@ -7,8 +7,8 @@
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Stop"
 
-$Pasta = "C:\Users\uira_\OneDrive\Documentos\Sistema Unificado da Olika\olika-whatsapp-integration"
-$Repo  = "https://github.com/Uiramaral/olika-whatsapp-integration.git"
+$Pasta = $PSScriptRoot
+$Repo = "https://github.com/Uiramaral/olika-whatsapp-integration.git"
 
 Write-Host "----------------------------------------" -ForegroundColor Cyan
 Write-Host "Atualizando repositório: Olika WhatsApp Integration" -ForegroundColor Yellow
