@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const NodeCache = require('node-cache');
+const authCache = new NodeCache({ stdTTL: 300 }); // Cache de 5 minutos
 const { startSock, sendMessage, isConnected, forceLogout, getCurrentPhone } = require('./services/socket');
 const logger = require('./config/logger');
 
@@ -88,25 +90,47 @@ function deveCarregarIA() {
     return global.client && global.client.has_ia && global.client.plan === 'ia';
 }
 
-// Middleware de Segurança para endpoints protegidos
-const requireAuth = (req, res, next) => {
+// Middleware de Segurança para endpoints protegidos (Validação no banco via Laravel)
+const requireAuth = async (req, res, next) => {
     // Aceita token de múltiplas fontes para compatibilidade (inclui 'apikey' para Evolution API)
     const token = req.headers['x-api-token'] || req.headers['x-webhook-token'] || req.headers['x-olika-token'] || req.headers['apikey'];
     
-    // Se não tiver token configurado, bloquear por segurança
-    if (!API_TOKEN && !WEBHOOK_TOKEN) {
-        logger.error('ERRO CRÍTICO: Nenhum token configurado no .env');
-        return res.status(500).json({ error: 'Configuração de servidor inválida' });
+    if (!token) {
+        logger.warn('Tentativa de acesso negado. Token não fornecido.');
+        return res.status(403).json({ error: 'Acesso negado: Token ausente' });
     }
 
-    const validToken = token === API_TOKEN || token === WEBHOOK_TOKEN || token === API_TOKEN_NODE;
-    
-    if (validToken) {
-        next();
-    } else {
-        logger.warn(`Tentativa de acesso negado. Token recebido: ${token ? token.substring(0, 10) + '...' : 'nenhum'}`);
-        res.status(403).json({ error: 'Acesso negado' });
+    // 1. Verifica se o token já está no cache (validado recentemente)
+    if (authCache.get(token)) {
+        return next();
     }
+
+    // 2. Valida o token consultando o backend Laravel
+    try {
+        const response = await axios.get(`${LARAVEL_API_URL}/api/whatsapp/settings`, {
+            headers: {
+                'X-API-Token': token,
+                'Accept': 'application/json'
+            },
+            timeout: 5000
+        });
+
+        if (response.status === 200) {
+            // Token válido! Salva no cache por 5 minutos para otimizar próximas requisições
+            authCache.set(token, true);
+            return next();
+        }
+    } catch (error) {
+        // Ignora erro 403, pois significa apenas que o token é inválido no banco
+        if (error.response && error.response.status !== 403) {
+            logger.error(`❌ Erro ao validar token com o Laravel: HTTP ${error.response.status}`);
+        } else if (!error.response) {
+            logger.error(`❌ Erro de conexão ao validar token com o Laravel: ${error.message}`);
+        }
+    }
+
+    logger.warn(`Tentativa de acesso negado. Token inválido (não bate com o banco): ${token.substring(0, 10)}...`);
+    res.status(403).json({ error: 'Acesso negado: Token inválido' });
 };
 
 // Endpoint de health check (público) - SEMPRE responde, mesmo se Baileys não estiver pronto
@@ -274,9 +298,18 @@ async function getWhatsAppPhone() {
     }
 }
 
-// Endpoint para desconectar WhatsApp manualmente
-// Endpoint de desconexão removido - use restartWhatsAppConnection() para reiniciar
-// app.post('/api/whatsapp/disconnect', ...) - não mais necessário
+// Endpoint para desconectar WhatsApp manualmente (Logout)
+app.post('/api/whatsapp/disconnect', requireAuth, async (req, res) => {
+    try {
+        logger.info('🔴 Solicitação de desconexão manual recebida');
+        const { disconnectSock } = require('./services/socket');
+        const result = await disconnectSock();
+        res.json(result);
+    } catch (error) {
+        logger.error('Erro ao desconectar:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 
 // Endpoint para limpar credenciais corrompidas (útil para resolver problemas de sessão)
 app.post('/api/whatsapp/clear-auth', requireAuth, async (req, res) => {

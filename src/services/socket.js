@@ -46,6 +46,11 @@ const openai = new OpenAI({
 });
 
 const msgRetryCounterCache = new NodeCache();
+const adminNotifyCooldownCache = new NodeCache();
+
+// 📲 Notificação ao Administrador (celular que recebe alerta quando um cliente manda msg)
+const ADMIN_NOTIFY_PHONE = process.env.ADMIN_NOTIFY_PHONE || '5571981750546';
+const ADMIN_NOTIFY_COOLDOWN = parseInt(process.env.ADMIN_NOTIFY_COOLDOWN, 10) || 1800; // 30 minutos de silêncio por cliente
 
 let globalSock = null;
 let isSocketConnected = false;
@@ -453,6 +458,46 @@ const startSock = async (phoneOverride = null) => {
     // 🚨 LOG DO NÚMERO DO REMETENTE APÓS FILTROS
     const senderPhone = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
     logger.info(`📞 [FILTRO 3] Mensagem válida de: ${senderPhone} (JID: ${senderJid})`);
+
+    // 📲 ALERTA AO ADMINISTRADOR (71981750546) COM JANELA DE SILÊNCIO (COOLDOWN)
+    const adminPhoneClean = ADMIN_NOTIFY_PHONE.replace(/\D/g, '');
+    const cleanSenderPhone = senderPhone ? senderPhone.replace(/\D/g, '') : '';
+
+    // Evita loop se a mensagem for enviada pelo próprio administrador
+    if (adminPhoneClean && cleanSenderPhone && !cleanSenderPhone.endsWith(adminPhoneClean.slice(-8))) {
+      const cooldownKey = `admin_notif_${cleanSenderPhone}`;
+      const jaNotificado = adminNotifyCooldownCache.get(cooldownKey);
+
+      if (!jaNotificado) {
+        // Armazena no cache pelo período do cooldown (padrão 30 min)
+        adminNotifyCooldownCache.set(cooldownKey, true, ADMIN_NOTIFY_COOLDOWN);
+
+        const pushName = incomingMessage.pushName || 'Cliente';
+        const msgRaw = incomingMessage.message?.conversation ||
+                       incomingMessage.message?.extendedTextMessage?.text ||
+                       (incomingMessage.message?.imageMessage ? '[📷 Foto/Imagem]' :
+                        incomingMessage.message?.audioMessage ? '[🎵 Mensagem de Áudio]' :
+                        incomingMessage.message?.documentMessage ? '[📄 Documento]' :
+                        '[Mídia/Arquivo]');
+
+        const msgResumo = msgRaw.length > 160 ? msgRaw.substring(0, 157) + '...' : msgRaw;
+        const cooldownMin = Math.round(ADMIN_NOTIFY_COOLDOWN / 60);
+
+        const alertaAdmin = `🔔 *Nova mensagem no WhatsApp da Olika*\n\n` +
+                            `👤 *Cliente:* ${pushName} (${cleanSenderPhone})\n` +
+                            `💬 *Mensagem:* "${msgResumo}"\n\n` +
+                            `_Próximos avisos deste número silenciados por ${cooldownMin} min._`;
+
+        logger.info(`📲 [Alerta Admin] Notificando ${adminPhoneClean} sobre primeira mensagem de ${cleanSenderPhone}...`);
+
+        // Disparo assíncrono (sem bloquear o processamento da IA ou webhooks)
+        sendMessage(adminPhoneClean, alertaAdmin)
+          .then(() => logger.info(`✅ [Alerta Admin] Alerta entregue com sucesso para o administrador (${adminPhoneClean})!`))
+          .catch((err) => logger.warn(`⚠️ [Alerta Admin] Falha ao enviar alerta para ${adminPhoneClean}: ${err.message}`));
+      } else {
+        logger.info(`⏳ [Alerta Admin] Mensagem de ${cleanSenderPhone} em período de silêncio (cooldown de ${Math.round(ADMIN_NOTIFY_COOLDOWN / 60)} min ativo).`);
+      }
+    }
 
     // 🚨 INTEGRAÇÃO COM N8N: Se N8N_WEBHOOK_URL estiver configurada no Railway (ou via fallback), desvia o fluxo para o n8n
     const n8nUrl = process.env.N8N_WEBHOOK_URL || "https://n8n-production-e19d.up.railway.app/webhook-test/d10aac8e-455d-4345-94a3-54a33bec56ff";
