@@ -257,23 +257,28 @@ const startSock = async (phoneOverride = null) => {
 
   // Geração do Código de Pareamento
   if (!sock.authState.creds.registered) {
-    isPairingInProgress = true; // 🆕 Marca que está pareando
-    console.log("⏳ Aguardando (3s) para pedir código...");
+    isPairingInProgress = true;
+    console.log("⏳ Aguardando (3s) para pedir código de pareamento...");
     setTimeout(async () => {
-      // 🆕 Retry: tenta até 3 vezes pedir o código
+      const cleanPhone = String(currentPhone || '').replace(/\D/g, '');
+      if (!cleanPhone) {
+        console.error("❌ Telefone inválido para solicitar código de pareamento.");
+        return;
+      }
+
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          console.log(`📱 Tentativa ${attempt}/3 de solicitar código...`);
-          const code = await sock.requestPairingCode(currentPhone.replace(/\D/g, ""));
+          console.log(`📱 Tentativa ${attempt}/3 de solicitar código para ${cleanPhone}...`);
+          const code = await sock.requestPairingCode(cleanPhone);
           console.log(`\n#################################################`);
-          console.log(`📠 CÓDIGO (${currentPhone}): ${code?.match(/.{1,4}/g)?.join("-")}`);
+          console.log(`📠 CÓDIGO (${cleanPhone}): ${code?.match(/.{1,4}/g)?.join("-")}`);
           console.log(`#################################################\n`);
           global.currentPairingCode = code;
 
-          // 🆕 Timeout para limpar código expirado (5 minutos)
+          // Timeout para limpar código expirado (5 minutos)
           setTimeout(() => {
             if (global.currentPairingCode === code && !isSocketConnected) {
-              console.log("⏰ Código de pareamento expirado. Solicite novo código.");
+              console.log("⏰ Código de pareamento expirado. Solicite novo código se necessário.");
               global.currentPairingCode = null;
             }
           }, 5 * 60 * 1000);
@@ -287,7 +292,7 @@ const startSock = async (phoneOverride = null) => {
           }
         }
       }
-    }, 3000); // Reduzido de 5s para 3s
+    }, 3000);
   }
 
   // Monitoramento de Conexão
@@ -298,13 +303,13 @@ const startSock = async (phoneOverride = null) => {
       console.log(`✅ ${currentPhone} CONECTADO!`);
       globalSock = sock;
       isSocketConnected = true;
-      isConnecting = false; // 🆕 Libera flag de conexão
-      isPairingInProgress = false; // 🆕 Pareamento concluído
+      isConnecting = false;
+      isPairingInProgress = false;
       global.currentPairingCode = null;
-      consecutiveFailures = 0; // 👈 ZERA O CONTADOR DE SUCESSO
+      consecutiveFailures = 0;
 
       axios.post(WEBHOOK_URL, {
-        client_id: CLIENT_ID, // ✅ NOVO: Multi-instância
+        client_id: CLIENT_ID,
         type: 'connection_update',
         instance_phone: currentPhone,
         status: 'CONNECTED'
@@ -313,76 +318,70 @@ const startSock = async (phoneOverride = null) => {
 
     if (connection === "close") {
       isSocketConnected = false;
-      isConnecting = false; // 🆕 Libera flag
+      isConnecting = false;
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
 
-      // 🆕 Não incrementa falhas durante pareamento inicial (códigos 515, 408)
-      const pairingErrorCodes = [515, 408, 428]; // Timeout de pareamento
-      if (isPairingInProgress && pairingErrorCodes.includes(reason)) {
-        console.log(`⚠️ Falha de pareamento (${reason}). Não conta como falha permanente.`);
-        isPairingInProgress = false;
-      } else {
-        consecutiveFailures++; // 👈 INCREMENTA A FALHA apenas se não for pareamento
-      }
-      console.log(`🔴 Desconectado (${reason}). Tentativa ${consecutiveFailures}/3.`);
+      // Erros comuns e esperados durante pareamento e restarts do WhatsApp Web
+      const isTransientOrPairing = [500, 515, 408, 428].includes(reason) || isPairingInProgress || !sock.authState.creds.registered;
 
-      // 🔔 Webhook de Status
+      if (isTransientOrPairing) {
+        console.log(`⚠️ Desconexão transitória ou de pareamento (${reason}). Mantendo credenciais.`);
+      } else {
+        consecutiveFailures++;
+        console.log(`🔴 Desconectado (${reason}). Falhas consecutivas: ${consecutiveFailures}/5.`);
+      }
+
+      // Webhook de Status para o Laravel
       axios.post(WEBHOOK_URL, {
-        client_id: CLIENT_ID, // ✅ NOVO: Multi-instância
+        client_id: CLIENT_ID,
         type: 'connection_update',
         instance_phone: currentPhone,
         status: 'DISCONNECTED'
       }).catch(() => { });
 
-      // 🚨 NÍVEL 2/3: LOGOUT FATAL OU LIMITE DE FALHAS EXCEDIDO (3 tentativas consecutivas)
-      if (reason === DisconnectReason.loggedOut || consecutiveFailures >= 3) {
+      // LOGOUT MANUAL DETECTADO (401) OU LIMITE DE 5 FALHAS CONSECUTIVAS EM PRODUÇÃO
+      if (reason === DisconnectReason.loggedOut || consecutiveFailures >= 5) {
+        console.error("🚨 SESSÃO ENCERRADA (Logout ou Falha Persistente). Resetando credenciais...");
 
-        console.error("🚨 LIMITE DE FALHAS ATINGIDO ou LOGOUT FATAL. Deletando credenciais corrompidas...");
-
-        // 1. Notifica o Laravel para exibir o erro ao usuário
+        // Notifica o Laravel
         axios.post(WEBHOOK_URL, {
           type: 'shutdown_alert',
           instance_phone: currentPhone,
-          reason: 'PERSISTENT_FAILURE'
+          reason: reason === DisconnectReason.loggedOut ? 'LOGGED_OUT' : 'PERSISTENT_FAILURE'
         }).catch(() => { });
 
-        // 2. Limpeza de arquivos de sessão
-        const sessionPath = path.join(BASE_AUTH_DIR, currentPhone);
-        if (fs.existsSync(sessionPath)) {
+        // Limpeza automática da pasta de sessão corrompida
+        const sessionPath = path.join(BASE_AUTH_DIR, currentPhone || '');
+        if (currentPhone && fs.existsSync(sessionPath)) {
           try {
             fs.rmSync(sessionPath, { recursive: true, force: true });
-            console.log("🗑️ Pasta de autenticação corrompida deletada com sucesso.");
+            console.log("🗑️ Pasta de sessão corrompida/antiga removida com sucesso.");
           } catch (fsErr) {
             console.error("Erro ao deletar pasta de sessão:", fsErr.message);
           }
         }
 
-        // Guardar o telefone antes de limpar referências
-        const phoneToRestart = currentPhone;
-
-        // 3. Desativa o socket global
         globalSock = null;
         global.currentPairingCode = null;
-        consecutiveFailures = 0; // Zera para a próxima tentativa
+        consecutiveFailures = 0;
         isConnecting = false;
         isPairingInProgress = false;
 
         if (reason === DisconnectReason.loggedOut) {
-          // Se foi logout manual pelo app do celular, remove config e entra em STANDBY
-          console.log("🚫 Logout manual detectado. Removendo configuração e entrando em modo STANDBY.");
+          console.log("🚫 Logout pelo celular. Entrando em modo STANDBY.");
           removeConfig();
         } else {
-          // Se foi loop de erro (ex: Bad MAC), reinicia automaticamente para novo pareamento
-          console.log(`🔄 Reiniciando socket para ${phoneToRestart} em 5 segundos para novo pareamento...`);
-          setTimeout(() => {
-            startSock(phoneToRestart);
-          }, 5000);
+          console.log("🔄 Reset automático executado. Aguardando novo comando /connect.");
         }
-
       } else {
-        // NÍVEL 1: Falha Transitória (Tenta reconectar)
-        console.log("🔄 Queda temporária. Tentando reconectar...");
-        startSock();
+        // Reconexão suave com debounce de 3 segundos para evitar loops de concorrência
+        const phoneToReconnect = currentPhone;
+        console.log("🔄 Reconectando socket em 3s...");
+        setTimeout(() => {
+          if (!isSocketConnected && phoneToReconnect) {
+            startSock(phoneToReconnect);
+          }
+        }, 3000);
       }
     }
   });
