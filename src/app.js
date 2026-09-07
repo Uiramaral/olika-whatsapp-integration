@@ -301,13 +301,17 @@ async function getWhatsAppPhone() {
 // Endpoint para desconectar WhatsApp manualmente (Logout)
 app.post('/api/whatsapp/disconnect', requireAuth, async (req, res) => {
     try {
-        logger.info('🔴 Solicitação de desconexão manual recebida');
+        logger.info('🔌 Solicitação de desconexão manual recebida');
         const { disconnectSock } = require('./services/socket');
         const result = await disconnectSock();
         res.json(result);
     } catch (error) {
-        logger.error('Erro ao desconectar:', error);
-        res.status(500).json({ success: false, error: error.message });
+        logger.error('Erro ao desconectar, forçando logout:', error);
+        try {
+            const { forceLogout } = require('./services/socket');
+            await forceLogout();
+        } catch(e) {}
+        res.json({ success: true, message: 'Desconectado de forma forçada devido a erro.' });
     }
 });
 
@@ -327,14 +331,15 @@ app.post('/api/whatsapp/clear-auth', requireAuth, async (req, res) => {
         
         // Limpar todos os arquivos da sessão
         try {
-            const files = await fs.readdir(SESSION_PATH).catch(() => []);
-            let deletedCount = 0;
-            
-            for (const file of files) {
-                const filePath = path.join(SESSION_PATH, file);
-                await fs.unlink(filePath).catch(() => {});
-                deletedCount++;
-            }
+            // Forçar o encerramento do socket em memória
+            try {
+                const { forceLogout } = require('./services/socket');
+                await forceLogout();
+            } catch(e) { }
+
+            // Remover o diretório inteiro e recriar
+            await fs.rm(SESSION_PATH, { recursive: true, force: true }).catch(() => {});
+            let deletedCount = 1;
             
             // Limpar estado global
             global.sock = null;
@@ -574,36 +579,7 @@ app.post('/api/whatsapp/restart', requireAuth, async (req, res) => {
     }
 });
 
-// --- Rota de Desconexão (POST /disconnect) ---
-// Desconecta a instância WhatsApp sem deletar credenciais
-app.post('/api/whatsapp/disconnect', requireAuth, async (req, res) => {
-    const { disconnectSock } = require('./services/socket');
-    
-    if (!isConnected()) {
-        return res.json({ 
-            success: true, 
-            status: 'ALREADY_DISCONNECTED',
-            message: 'Instância já desconectada'
-        });
-    }
-    
-    try {
-        logger.info('🔴 [DISCONNECT] Recebida solicitação de desconexão');
-        await disconnectSock();
-        logger.info('✅ [DISCONNECT] Instância desconectada com sucesso');
-        res.json({ 
-            success: true, 
-            status: 'DISCONNECTED',
-            message: 'Instância desconectada com sucesso'
-        });
-    } catch (error) {
-        logger.error(`[DISCONNECT] Erro ao desconectar: ${error.message}`);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
-});
+
 
 /**
  * Endpoint profissional para notificações do Laravel
