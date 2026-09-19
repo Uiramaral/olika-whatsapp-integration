@@ -26,7 +26,9 @@ const CLIENT_ID = process.env.CLIENT_ID;
 
 // 🚨 Configurações de Controle de IA
 const AI_STATUS_URL = process.env.AI_STATUS_URL;
-const WH_API_TOKEN = process.env.WH_API_TOKEN;
+// Mesma precedência do app.js: fonte única do token Gateway -> Laravel.
+// API_SECRET é o valor que bate com o chave_api; process.env.API_TOKEN fica por último.
+const WH_API_TOKEN = process.env.WH_API_TOKEN || process.env.API_SECRET || process.env.API_TOKEN;
 const STATUS_CACHE_TTL = 30; // 🚨 NOVO: Cache de 30 segundos
 
 // 🤖 Configurações da OpenAI
@@ -51,7 +53,11 @@ const msgRetryCounterCache = new NodeCache();
 // Sem devolver a mensagem original, o WhatsApp não consegue retentar o envio e o
 // remetente vê "Aguardando mensagem. Essa ação pode levar alguns instantes."
 const messageStore = new NodeCache({ stdTTL: 3600, maxKeys: 5000, useClones: false });
-const buildMessageKey = (key) => (key && key.remoteJid && key.id ? `${key.remoteJid}:${key.id}` : null);
+// Controle para não consultar/reenviar pre-keys a cada mensagem (evita roundtrip por envio)
+const preKeyCheckCache = new NodeCache({ stdTTL: 600 });
+// Indexa SOMENTE pelo id: o retry do WhatsApp pode referenciar a mensagem com
+// outra forma de JID (ex.: @lid) diferente da usada no envio (@s.whatsapp.net).
+const buildMessageKey = (key) => (key && key.id ? key.id : null);
 const storeMessage = (key, message) => {
   const storeKey = buildMessageKey(key);
   if (storeKey && message) messageStore.set(storeKey, message);
@@ -345,6 +351,20 @@ const startSock = async (phoneOverride = null) => {
     markOnlineOnConnect: process.env.MARK_ONLINE_ON_CONNECT === 'true',
     syncFullHistory: false,
     msgRetryCounterCache,
+    // Garante pre-keys válidas antes de enviar (evita sessão sem chave → "Aguardando mensagem")
+    patchMessageBeforeSending: async (msg) => {
+      if (!preKeyCheckCache.get('checked')) {
+        preKeyCheckCache.set('checked', true);
+        try {
+          if (globalSock?.uploadPreKeysToServerIfRequired) {
+            await globalSock.uploadPreKeysToServerIfRequired();
+          }
+        } catch (e) {
+          logger.warn(`⚠️ [PreKeys] Falha ao verificar/reenviar pre-keys: ${e.message}`);
+        }
+      }
+      return msg;
+    },
     connectTimeoutMs: 90000,
     retryRequestDelayMs: 2000,
     defaultQueryTimeoutMs: 60000,

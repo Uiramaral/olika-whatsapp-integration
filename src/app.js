@@ -18,7 +18,13 @@ const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || API_TOKEN; // Fallback para A
 
 // ✅ NOVO: Variáveis de ambiente para multi-instância
 const CLIENT_ID = process.env.CLIENT_ID;
-const API_TOKEN_NODE = process.env.API_TOKEN || process.env.WH_API_TOKEN || API_TOKEN;
+// Fonte única do token Gateway -> Laravel. Deve ser IGUAL ao `chave_api` da instância
+// no banco do Laravel (é o que o painel usa). API_SECRET é o valor confirmado.
+// `process.env.API_TOKEN` fica por último para não sobrescrever o valor correto.
+const API_TOKEN_NODE = process.env.WH_API_TOKEN || process.env.API_SECRET || process.env.API_TOKEN;
+if (!process.env.WH_API_TOKEN) {
+    logger.warn('⚠️ WH_API_TOKEN não definido; usando API_SECRET (chave_api). Recomendado definir WH_API_TOKEN = API_SECRET e remover o API_TOKEN divergente.');
+}
 const LARAVEL_API_URL = process.env.LARAVEL_API_URL || process.env.WEBHOOK_URL?.replace('/api/whatsapp/webhook', '') || 'https://devpedido.menuolika.com.br';
 
 // ✅ NOVO: Cliente global
@@ -182,7 +188,7 @@ app.get('/api/whatsapp/status', requireAuth, (req, res) => {
 // IMPORTANTE: Prioriza sempre o banco de dados sobre variáveis de ambiente
 async function getWhatsAppPhone() {
     const laravelApiUrl = process.env.LARAVEL_API_URL || 'https://devpedido.menuolika.com.br';
-    const laravelApiKey = process.env.API_SECRET || API_TOKEN;
+    const laravelApiKey = API_TOKEN_NODE;
     
     try {
         // Usar require('https') ou 'http' para fazer requisição (Node.js nativo)
@@ -217,7 +223,7 @@ async function getWhatsAppPhone() {
                         logger.error(`❌ Erro de autenticação (403). Token inválido ou não fornecido.`);
                         logger.error(`📋 Resposta: ${data}`);
                         logger.error(`🔑 Token enviado: ${laravelApiKey ? '***' + laravelApiKey.slice(-4) : 'não fornecido'}`);
-                        logger.error(`⚠️ Verifique se API_SECRET no Railway é igual ao API_SECRET/WEBHOOK_TOKEN no Laravel`);
+                        logger.error(`⚠️ Defina WH_API_TOKEN no Railway com o mesmo valor do chave_api da instância no Laravel`);
                         const fallback = process.env.WHATSAPP_PHONE || "5571987019420";
                         logger.warn(`⚠️ Usando número fallback devido a erro de autenticação: ${fallback}`);
                         resolve(fallback);
