@@ -12,7 +12,6 @@ const path = require("path");
 const axios = require('axios');
 const NodeCache = require("node-cache");
 const logger = require('../config/logger');
-const { OpenAI } = require('openai');
 const { extractDataForAI } = require('../utils/ai_processor');
 const { getContentType } = require('@whiskeysockets/baileys');
 
@@ -31,21 +30,15 @@ const AI_STATUS_URL = process.env.AI_STATUS_URL;
 const WH_API_TOKEN = process.env.WH_API_TOKEN || process.env.API_SECRET || process.env.API_TOKEN;
 const STATUS_CACHE_TTL = 30; // 🚨 NOVO: Cache de 30 segundos
 
-// 🤖 Configurações da OpenAI
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5-nano'; // Modelo de custo otimizado
-const OPENAI_TIMEOUT = parseInt(process.env.OPENAI_TIMEOUT) * 1000 || 30000;
-
-// 🎭 Contexto Estático (Persona da IA)
-const AI_SYSTEM_PROMPT = process.env.AI_SYSTEM_PROMPT || "Você é um assistente profissional da Olika, otimizado para custo. Sua análise é baseada APENAS no texto que você recebe. Se houver mídia que não pôde ser processada, avise o usuário educadamente.";
+// 🎭 Contexto Estático (Persona da IA) — mantido apenas como referência legada
+const AI_SYSTEM_PROMPT = process.env.AI_SYSTEM_PROMPT || "Você é o atendente virtual da Olika.";
 
 // 📋 Contexto Dinâmico (URL para buscar dados do cliente)
 const CUSTOMER_CONTEXT_URL = process.env.CUSTOMER_CONTEXT_URL;
 
-// Inicialização da OpenAI (para o GPT-5-nano ou modelo configurado)
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  timeout: OPENAI_TIMEOUT
-});
+// 🤖 Atendimento por IA no Laravel (o Laravel decide o provedor: DeepSeek/Gemini)
+const IA_RESPONDER_URL = process.env.IA_RESPONDER_URL
+  || (WEBHOOK_URL ? WEBHOOK_URL.replace('/webhook', '/ia/responder') : null);
 
 const msgRetryCounterCache = new NodeCache();
 
@@ -800,45 +793,65 @@ const startSock = async (phoneOverride = null) => {
       .catch((e) => logger.warn('⚠️ [WEBHOOK] Erro ao pré-notificar Laravel:', e.message));
 
     try {
-      // Extrai dados e processa áudio/pdf (chamada condicional a Whisper)
-      const { payload } = await extractDataForAI(incomingMessage);
+      // Extrai dados (texto/pdf/mídia). Áudio NÃO é transcrito (tratado abaixo).
+      const { payload, type } = await extractDataForAI(incomingMessage);
 
-      // 🎭 CONTEXTO ESTÁTICO: Persona da IA (da variável de ambiente)
-      const systemPrompt = AI_SYSTEM_PROMPT;
+      // 🎵 ÁUDIO: a IA não ouve. Notifica o admin (ignorando cooldown) e avisa o cliente.
+      if (type === 'audio') {
+        const isAdmin = adminPhoneClean && senderPhone && senderPhone.endsWith(adminPhoneClean.slice(-8));
 
-      // 📋 CONTEXTO DINÂMICO: Busca dados do cliente no Laravel
-      const phoneNumber = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
-      const dynamicContext = await getCustomerContext(phoneNumber);
+        try {
+          await sendMessage(senderJid, 'Sou um atendente virtual com inteligência artificial e ainda não consigo ouvir áudios. Já avisei uma pessoa da equipe da Olika, que vai te responder por aqui. Se puder, escreva sua mensagem em texto. 🙏');
+        } catch (e) {
+          logger.error(`❌ [Áudio] Falha ao avisar o cliente: ${e.message}`);
+        }
 
-      // Construir prompt do usuário com contexto dinâmico
-      let finalUserPrompt = payload;
-      if (dynamicContext) {
-        finalUserPrompt = `${dynamicContext}\n\n[Mensagem do Usuário]: ${payload}`;
+        if (!isAdmin && adminPhoneClean) {
+          const alertaAudio = `🔔 *Áudio recebido no WhatsApp da Olika*\n\n` +
+            `👤 *Cliente:* ${incomingMessage.pushName || 'Cliente'} (${senderPhone})\n` +
+            `🎵 _Mensagem de áudio — a IA não transcreve. Atenda manualmente._`;
+          sendMessage(adminPhoneClean, alertaAudio)
+            .then(() => logger.info('✅ [Áudio] Administrador notificado (ignorando cooldown).'))
+            .catch((err) => logger.warn(`⚠️ [Áudio] Falha ao notificar admin: ${err.message}`));
+        }
+
+        return; // não chama a IA
       }
 
-      const contentForAI = [
-        { role: 'system', content: systemPrompt }, // Persona da IA
-        { role: 'user', content: finalUserPrompt } // Contexto + Mensagem do usuário
-      ];
+      // 🤖 Texto/PDF: quem responde é o Laravel (DeepSeek/Gemini)
+      const phoneNumber = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
+      const responderUrl = IA_RESPONDER_URL;
 
-      // 3. CHAMADA FINAL PARA O GPT (modelo configurado)
-      const response = await openai.chat.completions.create({
-        model: OPENAI_MODEL,
-        messages: contentForAI,
+      if (!responderUrl || !WH_API_TOKEN) {
+        throw new Error('IA_RESPONDER_URL/WH_API_TOKEN ausentes.');
+      }
+
+      const iaResponse = await axios.post(responderUrl, {
+        mensagem: payload,
+        telefone: phoneNumber,
+        message_id: incomingMessage.key.id
+      }, {
+        headers: {
+          'X-API-Token': WH_API_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        timeout: 25000
       });
 
-      const replyText = response.choices[0].message.content;
+      const replyText = iaResponse.data && iaResponse.data.resposta;
 
-      // 4. RESPOSTA AO USUÁRIO (A função sendMessage agora é robusta)
+      if (!replyText || iaResponse.data.allowlist === false) {
+        logger.info(`🚫 [IA] Sem resposta para ${senderJid} (allowlist/indisponível).`);
+        return;
+      }
+
       await sendMessage(senderJid, replyText);
-      logger.info(`✅ Resposta da IA enviada para ${senderJid}`);
-      // (webhook já enviado antes do try, não duplicar)
+      logger.info(`✅ Resposta da IA (Laravel) enviada para ${senderJid}`);
 
     } catch (error) {
       logger.error(`❌ ERRO NO FLUXO DE ORQUESTRAÇÃO: ${error.message}`);
       try {
-        // A chamada sendMessage é mais robusta, mas ainda pode lançar erro.
-        await sendMessage(senderJid, "Desculpe, a análise de IA falhou. Por favor, tente novamente mais tarde.");
+        await sendMessage(senderJid, "Desculpe, não consegui responder agora. Já avisei a equipe da Olika e logo te retornamos. 🙏");
       } catch (sendError) {
         logger.error(`❌ Erro ao enviar mensagem de erro: ${sendError.message}`);
       }

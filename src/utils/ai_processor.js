@@ -1,18 +1,10 @@
 // utils/ai_processor.js
 
 const { downloadContentFromMessage, getContentType } = require('@whiskeysockets/baileys');
-const { OpenAI } = require('openai');
 const pdf = require('pdf-parse');
 const fs = require('fs');
 const path = require('path');
 const logger = require('../config/logger'); 
-
-// Configuração da OpenAI (necessária aqui para as chamadas condicionais Whisper)
-const OPENAI_TIMEOUT = parseInt(process.env.OPENAI_TIMEOUT) * 1000 || 30000; 
-const openai = new OpenAI({ 
-    apiKey: process.env.OPENAI_API_KEY,
-    timeout: OPENAI_TIMEOUT
-});
 
 const TEMP_DIR = path.resolve(__dirname, '..', '..', 'temp'); 
 if (!fs.existsSync(TEMP_DIR)) {
@@ -32,29 +24,6 @@ async function mediaToBuffer(messageContent) {
     } catch (e) {
         logger.error(`❌ Erro ao baixar stream de mídia: ${e.message}`);
         throw new Error("Falha no download da mídia.");
-    }
-}
-
-// 2. Transcreve Áudio (Usa Whisper API - Custo Adicional)
-async function transcribeAudio(audioBuffer, mimeType) {
-    const tempFileName = `audio_${Date.now()}.${mimeType.split('/')[1] || 'mp3'}`;
-    const tempFilePath = path.join(TEMP_DIR, tempFileName);
-
-    try {
-        fs.writeFileSync(tempFilePath, audioBuffer); 
-        const transcription = await openai.audio.transcriptions.create({
-            model: 'whisper-1', 
-            file: fs.createReadStream(tempFilePath),
-            response_format: 'text', // 🚨 AJUSTE: Garante o formato de retorno
-        });
-        return transcription.text;
-    } catch (e) {
-        logger.error(`❌ ERRO WHISPER API: ${e.message}`);
-        return '[ERRO DE TRANSCRIÇÃO]'; 
-    } finally {
-        if (fs.existsSync(tempFilePath)) {
-            fs.unlinkSync(tempFilePath); // CRÍTICO: Limpa o volume do Railway
-        }
     }
 }
 
@@ -89,21 +58,10 @@ async function extractDataForAI(incomingMessage) {
             break;
 
         case 'audioMessage':
-            try {
-                const buffer = await mediaToBuffer(incomingMessage.message);
-                const mimeType = messageContent.mimetype || 'audio/mpeg';
-                const transcriptionText = await transcribeAudio(buffer, mimeType);
-                
-                if (transcriptionText === '[ERRO DE TRANSCRIÇÃO]') {
-                    // 🚨 AJUSTE: Mensagem de erro humanizada
-                    result.payload = "Desculpe, não consegui transcrever o áudio. Por favor, envie a mensagem como texto.";
-                } else {
-                    result.payload = `[ÁUDIO TRANSCREVIDO: ${transcriptionText}]. Instrução: Responda ao áudio de forma concisa.`;
-                }
-            } catch (error) {
-                logger.error(`❌ Erro ao processar áudio: ${error.message}`);
-                result.payload = "Desculpe, houve um erro inesperado ao processar seu áudio. Tente novamente.";
-            }
+            // 🎵 Áudio NÃO é transcrito nesta fase (sem OpenAI/Whisper).
+            // O socket.js trata este tipo: avisa o cliente e notifica o administrativo.
+            result.type = 'audio';
+            result.payload = '[MENSAGEM DE ÁUDIO]';
             break;
 
         case 'imageMessage':
