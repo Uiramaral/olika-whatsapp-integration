@@ -46,6 +46,21 @@ const openai = new OpenAI({
 });
 
 const msgRetryCounterCache = new NodeCache();
+
+// 📦 Store de mensagens para o getMessage (retry de entrega do WhatsApp).
+// Sem devolver a mensagem original, o WhatsApp não consegue retentar o envio e o
+// remetente vê "Aguardando mensagem. Essa ação pode levar alguns instantes."
+const messageStore = new NodeCache({ stdTTL: 3600, maxKeys: 5000, useClones: false });
+const buildMessageKey = (key) => (key && key.remoteJid && key.id ? `${key.remoteJid}:${key.id}` : null);
+const storeMessage = (key, message) => {
+  const storeKey = buildMessageKey(key);
+  if (storeKey && message) messageStore.set(storeKey, message);
+};
+const getStoredMessage = (key) => {
+  const storeKey = buildMessageKey(key);
+  return storeKey ? messageStore.get(storeKey) : undefined;
+};
+
 const adminNotifyCooldownCache = new NodeCache();
 
 // 📲 Notificação ao Administrador (celular que recebe alerta quando um cliente manda msg)
@@ -69,6 +84,91 @@ let isPairingInProgress = false;
 // Este mapa é populado via contacts.upsert e usado para resolver o número real
 const lidToJidMap = new Map();
 
+// 🔁 Recuperação automática de envios travados / sessão
+const SEND_ACK_TIMEOUT_MS = parseInt(process.env.SEND_ACK_TIMEOUT_MS, 10) || 30000;
+const SOFT_RESTART_COOLDOWN_SECONDS = parseInt(process.env.SOFT_RESTART_COOLDOWN_SECONDS, 10) || 300;
+const softRestartCooldown = new NodeCache();
+const pendingAcks = new Map(); // messageId -> { timeout, jid }
+let isSoftRestarting = false;
+
+const clearPendingSend = (id) => {
+  const entry = pendingAcks.get(id);
+  if (entry) {
+    clearTimeout(entry.timeout);
+    pendingAcks.delete(id);
+  }
+};
+
+const registerPendingSend = (key) => {
+  if (!key?.id) return;
+  clearPendingSend(key.id);
+  const timeout = setTimeout(() => {
+    pendingAcks.delete(key.id);
+    logger.warn(`⏱️ [Envio] Sem confirmação (ack) para ${key.remoteJid} id=${key.id}. Disparando recuperação automática.`);
+    softRestart('send-ack-timeout');
+  }, SEND_ACK_TIMEOUT_MS);
+  pendingAcks.set(key.id, { timeout, jid: key.remoteJid });
+};
+
+// Reinício suave: encerra o socket em memória e reconecta com as credenciais atuais
+// (sem novo pareamento). Distinto do reset destrutivo (forceLogout/clear-auth).
+const softRestart = async (reason = 'manual') => {
+  if (isSoftRestarting) {
+    logger.warn(`⚠️ [SoftRestart] Já em andamento (motivo ignorado: ${reason}).`);
+    return { success: false, message: 'Reinício já em andamento' };
+  }
+  if (softRestartCooldown.get('cooldown')) {
+    logger.warn(`⚠️ [SoftRestart] Em cooldown. Motivo ignorado: ${reason}.`);
+    return { success: false, message: 'Em cooldown' };
+  }
+
+  const phone = currentPhone || loadConfig();
+  if (!phone) {
+    logger.warn('⚠️ [SoftRestart] Sem número configurado.');
+    return { success: false, message: 'Sem número configurado' };
+  }
+
+  isSoftRestarting = true;
+  softRestartCooldown.set('cooldown', true, SOFT_RESTART_COOLDOWN_SECONDS);
+  logger.warn(`♻️ [SoftRestart] Reiniciando sessão (motivo: ${reason}). Sem novo pareamento.`);
+
+  pendingAcks.forEach((entry) => clearTimeout(entry.timeout));
+  pendingAcks.clear();
+  if (globalSock) { try { globalSock.end(); } catch { } }
+  globalSock = null;
+  isSocketConnected = false;
+  isConnecting = true;
+  global.isConnecting = true;
+
+  setTimeout(async () => {
+    try {
+      await startSock(phone);
+    } catch (e) {
+      logger.error(`❌ [SoftRestart] Falha ao reconectar: ${e.message}`);
+    } finally {
+      isSoftRestarting = false;
+    }
+  }, 2000);
+
+  return { success: true, message: `Sessão reiniciada (${reason})` };
+};
+
+const getDiagnostics = () => ({
+  connected: isSocketConnected,
+  isConnecting: isConnecting || false,
+  isSoftRestarting,
+  currentPhone: currentPhone || null,
+  pendingAcks: pendingAcks.size,
+});
+
+// Extrai o JID de telefone real a partir dos campos alternativos que o Baileys
+// expõe nos keys (@lid). Retorna null quando não há telefone disponível.
+const pnJidFromKey = (key) => {
+  const pn = key?.senderPn || key?.participantPn;
+  if (!pn) return null;
+  const digits = String(pn).replace(/\D/g, '');
+  return digits ? `${digits}@s.whatsapp.net` : null;
+};
 
 // --- Persistência de Configuração ---
 const loadConfig = () => {
@@ -240,18 +340,20 @@ const startSock = async (phoneOverride = null) => {
       keys: makeCacheableSignalKeyStore(state.keys, P({ level: "silent" })),
     },
     browser: ["Ubuntu", "Chrome", "20.0.04"],
-    markOnlineOnConnect: true,
+    // Padrão false: mantém o aparelho recebendo notificações push (recomendação do Baileys).
+    // Pode ser reativado via MARK_ONLINE_ON_CONNECT=true sem alterar código.
+    markOnlineOnConnect: process.env.MARK_ONLINE_ON_CONNECT === 'true',
     syncFullHistory: false,
     msgRetryCounterCache,
     connectTimeoutMs: 90000,
     retryRequestDelayMs: 2000,
     defaultQueryTimeoutMs: 60000,
-    // 🔑 CRÍTICO: Sem este handler, o Baileys descarta silenciosamente mensagens
-    // de números externos que precisam de contexto para descriptografia.
-    // Retorna undefined (não encontrado) é suficiente — o Baileys vai retentar.
+    // 🔑 CRÍTICO: retorna a mensagem original do store para permitir o retry de
+    // entrega do WhatsApp. Sem isso, o remetente vê "Aguardando mensagem".
     getMessage: async (key) => {
-      logger.info(`🔑 [getMessage] Solicitado para: ${key.remoteJid} id=${key.id}`);
-      return undefined;
+      const stored = getStoredMessage(key);
+      logger.info(`🔑 [getMessage] ${key?.remoteJid} id=${key?.id} -> ${stored ? 'encontrado' : 'não encontrado'}`);
+      return stored;
     },
   });
 
@@ -304,9 +406,14 @@ const startSock = async (phoneOverride = null) => {
       globalSock = sock;
       isSocketConnected = true;
       isConnecting = false;
+      global.isConnecting = false; // ✅ Libera o flag global usado pelo app.js (evita 429 permanente)
       isPairingInProgress = false;
       global.currentPairingCode = null;
       consecutiveFailures = 0;
+
+      // Evita timeouts obsoletos de envios da sessão anterior
+      pendingAcks.forEach((entry) => clearTimeout(entry.timeout));
+      pendingAcks.clear();
 
       axios.post(WEBHOOK_URL, {
         client_id: CLIENT_ID,
@@ -319,6 +426,7 @@ const startSock = async (phoneOverride = null) => {
     if (connection === "close") {
       isSocketConnected = false;
       isConnecting = false;
+      global.isConnecting = false; // ✅ Libera o flag global em qualquer desconexão
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
 
       // Erros comuns e esperados durante pareamento e restarts do WhatsApp Web
@@ -403,6 +511,9 @@ const startSock = async (phoneOverride = null) => {
       timestamp: new Date().toISOString()
     });
 
+    // 📦 Guarda no store para o getMessage (retry/descriptografia)
+    storeMessage(incomingMessage.key, incomingMessage.message);
+
     // Filtro essencial para não processar status ou mensagens próprias
     if (fromMeRaw || !incomingMessage.message) {
       logger.info(`⏭️ [FILTRO 1] Ignorada: fromMe=${fromMeRaw}, hasMessage=${!!incomingMessage.message}`);
@@ -413,8 +524,9 @@ const startSock = async (phoneOverride = null) => {
     // Mensagens de números externos chegam com @lid em vez de @s.whatsapp.net
     // Tentamos resolver via mapa; se não encontrado, processamos assim mesmo com log
     let senderJid = senderJidRaw;
+    let senderIsAlternativeId = false;
     if (senderJidRaw && senderJidRaw.endsWith('@lid')) {
-      const resolvedJid = lidToJidMap.get(senderJidRaw);
+      const resolvedJid = lidToJidMap.get(senderJidRaw) || pnJidFromKey(incomingMessage.key);
       if (resolvedJid) {
         logger.info(`🗺️ [LID] Resolvido ${senderJidRaw} → ${resolvedJid}`);
         senderJid = resolvedJid;
@@ -431,10 +543,10 @@ const startSock = async (phoneOverride = null) => {
           client_id: CLIENT_ID,
           lid: lidPuro,
           phone: cleanPhonePuro,
-          token: 'olika_socket_secure_token_55b91cf8e2c0e81b' // ✅ Injeta no corpo
+          token: WH_API_TOKEN // ✅ Injeta no corpo
         }, {
           headers: {
-            'X-API-Token': WH_API_TOKEN || 'olika_socket_secure_token_55b91cf8e2c0e81b' // ✅ Injeta no Header
+            'X-API-Token': WH_API_TOKEN // ✅ Injeta no Header
           }
         }).catch((e) => logger.error(`❌ [LID Sync Express] Erro ao sincronizar LID: ${e.message}`));
       } else {
@@ -442,6 +554,7 @@ const startSock = async (phoneOverride = null) => {
         // O número no banco será o LID até o contato ser mapeado
         const pushName = incomingMessage.pushName || 'Desconhecido';
         logger.warn(`⚠️ [LID] Não mapeado: ${senderJidRaw} (pushName=${pushName}). Processando com LID.`);
+        senderIsAlternativeId = true;
         senderJid = senderJidRaw; // mantém o @lid
       }
     }
@@ -483,7 +596,7 @@ const startSock = async (phoneOverride = null) => {
         const cooldownMin = Math.round(ADMIN_NOTIFY_COOLDOWN / 60);
 
         const alertaAdmin = `🔔 *Nova mensagem no WhatsApp da Olika*\n\n` +
-                            `👤 *Cliente:* ${pushName} (${cleanSenderPhone})\n` +
+                            `👤 *Cliente:* ${pushName}${senderIsAlternativeId ? ' (ID alternativo)' : ` (${cleanSenderPhone})`}\n` +
                             `💬 *Mensagem:* "${msgResumo}"\n\n` +
                             `_Próximos avisos deste número silenciados por ${cooldownMin} min._`;
 
@@ -563,10 +676,10 @@ const startSock = async (phoneOverride = null) => {
             await axios.post(updateNameUrl, {
               number: cleanIdentifier,
               name: pushNameAtual,
-              token: WH_API_TOKEN || 'olika_socket_secure_token_55b91cf8e2c0e81b'
+              token: WH_API_TOKEN
             }, {
               headers: {
-                'X-API-Token': WH_API_TOKEN || 'olika_socket_secure_token_55b91cf8e2c0e81b'
+                'X-API-Token': WH_API_TOKEN
               },
               timeout: 3000
             });
@@ -601,6 +714,7 @@ const startSock = async (phoneOverride = null) => {
         client_id: CLIENT_ID,
         phone: senderJid,
         is_lid: senderJid.endsWith('@lid'),
+        is_alternative_id: senderIsAlternativeId,
         instance_phone: currentPhone,
         message: text,
         ai_disabled: true,
@@ -687,6 +801,16 @@ const startSock = async (phoneOverride = null) => {
   });
   sock.ev.on("creds.update", saveCreds);
 
+  // ✅ Confirmações de entrega/leitura: libera o monitor de envio travado
+  sock.ev.on("messages.update", (updates) => {
+    for (const { key } of updates) {
+      if (key?.id && pendingAcks.has(key.id)) {
+        clearPendingSend(key.id);
+        logger.info(`✅ [Envio] Confirmação recebida para id=${key.id}`);
+      }
+    }
+  });
+
   // 🗺️ Listener para popular o mapa LID → JID real
   // O WhatsApp usa LIDs no protocolo multi-device. Quando contatos chegam,
   // guardamos o mapeamento LID → JID para resolver mensagens @lid.
@@ -711,10 +835,10 @@ const startSock = async (phoneOverride = null) => {
             client_id: CLIENT_ID,
             lid: lidPuro,
             phone: phonePuro,
-            token: 'olika_socket_secure_token_55b91cf8e2c0e81b' // ✅ Injeta no corpo
+            token: WH_API_TOKEN // ✅ Injeta no corpo
           }, {
             headers: {
-              'X-API-Token': WH_API_TOKEN || 'olika_socket_secure_token_55b91cf8e2c0e81b' // ✅ Injeta no Header
+              'X-API-Token': WH_API_TOKEN // ✅ Injeta no Header
             }
           }).catch(() => {});
         }
@@ -732,6 +856,8 @@ const startSock = async (phoneOverride = null) => {
 // --- Funções de Controle Exportadas ---
 const forceLogout = async () => {
   console.log("🚨 RESET MANUAL INICIADO!");
+
+  global.isConnecting = false; // ✅ Libera o flag global (permite novo /connect após reset)
 
   if (globalSock) {
     try { globalSock.end(); } catch { }
@@ -756,6 +882,8 @@ const forceLogout = async () => {
 // Desconecta a instância sem deletar credenciais
 const disconnectSock = async () => {
   console.log("🔴 DESCONEXÃO INICIADA!");
+
+  global.isConnecting = false; // ✅ Libera o flag global ao desconectar manualmente
 
   if (!globalSock) {
     console.warn('⚠️  Socket já está desconectado');
@@ -809,6 +937,10 @@ const sendMessage = async (phone, message) => {
 
     const sent = await globalSock.sendMessage(result.jid, { text: message });
 
+    // 📦 Guarda para retry (getMessage) e monitora confirmação de entrega
+    storeMessage(sent?.key, sent?.message);
+    registerPendingSend(sent?.key);
+
     return { success: true, messageId: sent.key.id };
   } catch (e) {
     // Loga o erro, mas permite que o fluxo externo continue sem quebrar o listener
@@ -828,4 +960,4 @@ process.on('unhandledRejection', (reason) => {
   logger.error('❌ UNHANDLED REJECTION (socket.js):', { reason: String(reason) });
 });
 
-module.exports = { sendMessage, startSock, isConnected, getCurrentPhone, forceLogout, disconnectSock };
+module.exports = { sendMessage, startSock, isConnected, getCurrentPhone, forceLogout, disconnectSock, softRestart, getDiagnostics };

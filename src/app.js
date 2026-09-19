@@ -4,7 +4,7 @@ const cors = require('cors');
 const axios = require('axios');
 const NodeCache = require('node-cache');
 const authCache = new NodeCache({ stdTTL: 300 }); // Cache de 5 minutos
-const { startSock, sendMessage, isConnected, forceLogout, getCurrentPhone } = require('./services/socket');
+const { startSock, sendMessage, isConnected, forceLogout, getCurrentPhone, softRestart, getDiagnostics } = require('./services/socket');
 const logger = require('./config/logger');
 
 const app = express();
@@ -164,6 +164,8 @@ app.get('/api/whatsapp/status', requireAuth, (req, res) => {
         connected: isConnected(), // Mantido para compatibilidade com Laravel
         isConnected: isConnected(), // Novo padrão
         isConnecting: global.isConnecting || false, // 🆕 Flag de conexão em andamento
+        isSoftRestarting: getDiagnostics().isSoftRestarting,
+        pendingAcks: getDiagnostics().pendingAcks,
         pairingCode: global.currentPairingCode || null, 
         currentPhone: getCurrentPhone() || null, 
         message: isConnected() 
@@ -571,12 +573,28 @@ app.get('/instance/connect/:instance', requireAuth, async (req, res) => {
 // O "Botão de Pânico" que executa o forceLogout para limpeza e Standby
 app.post('/api/whatsapp/restart', requireAuth, async (req, res) => {
     try {
-        const result = await forceLogout(); // Esta é a nova função
+        const result = await forceLogout(); // Reset destrutivo (exige novo pareamento)
         res.json(result);
     } catch (error) {
         logger.error('Erro na rota /restart:', error.message);
         res.status(500).json({ error: 'Falha ao forçar o logout da sessão.' });
     }
+});
+
+// Soft restart: reinicia a sessão reaproveitando as credenciais (sem novo pareamento)
+app.post('/api/whatsapp/restart-session', requireAuth, async (req, res) => {
+    try {
+        const result = await softRestart('manual');
+        res.json(result);
+    } catch (error) {
+        logger.error('Erro no soft restart:', error.message);
+        res.status(500).json({ success: false, error: 'Falha ao reiniciar a sessão.' });
+    }
+});
+
+// Diagnóstico do Gateway (estado, reconexão e envios pendentes)
+app.get('/api/whatsapp/diagnostics', requireAuth, (req, res) => {
+    res.json(getDiagnostics());
 });
 
 
