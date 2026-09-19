@@ -180,6 +180,27 @@ const pnJidFromKey = (key) => {
   return digits ? `${digits}@s.whatsapp.net` : null;
 };
 
+// Resolve @lid -> telefone. No Baileys 7.x a tradução LID<->PN é interna
+// (signalRepository.lidMapping.getPNForLID); usamos o lidToJidMap como cache.
+const resolveLidToPn = async (lidJid) => {
+  if (!lidJid || !String(lidJid).endsWith('@lid')) return null;
+  const cached = lidToJidMap.get(lidJid);
+  if (cached) return cached;
+  try {
+    const pn = await globalSock?.signalRepository?.lidMapping?.getPNForLID?.(lidJid);
+    if (pn) {
+      const user = String(pn).split('@')[0].split(':')[0];
+      const jid = `${user}@s.whatsapp.net`;
+      lidToJidMap.set(lidJid, jid);
+      logger.info(`🗺️ [LID] getPNForLID ${lidJid} → ${jid}`);
+      return jid;
+    }
+  } catch (e) {
+    logger.warn(`⚠️ [LID] Falha no getPNForLID para ${lidJid}: ${e.message}`);
+  }
+  return null;
+};
+
 // --- Persistência de Configuração ---
 const loadConfig = () => {
   try {
@@ -550,7 +571,7 @@ const startSock = async (phoneOverride = null) => {
     let senderJid = senderJidRaw;
     let senderIsAlternativeId = false;
     if (senderJidRaw && senderJidRaw.endsWith('@lid')) {
-      const resolvedJid = lidToJidMap.get(senderJidRaw) || pnJidFromKey(incomingMessage.key);
+      const resolvedJid = (await resolveLidToPn(senderJidRaw)) || pnJidFromKey(incomingMessage.key);
       if (resolvedJid) {
         logger.info(`🗺️ [LID] Resolvido ${senderJidRaw} → ${resolvedJid}`);
         senderJid = resolvedJid;
