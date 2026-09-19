@@ -91,7 +91,10 @@ let isPairingInProgress = false;
 const lidToJidMap = new Map();
 
 // 🔁 Recuperação automática de envios travados / sessão
-const SEND_ACK_TIMEOUT_MS = parseInt(process.env.SEND_ACK_TIMEOUT_MS, 10) || 30000;
+// Baileys 7.x mudou o comportamento de ACKs de entrega; por padrão o monitor
+// automático fica DESLIGADO (0 = desligado) para evitar soft restarts indevidos.
+// Reative com SEND_ACK_TIMEOUT_MS=<ms> se quiser o gatilho por ack.
+const SEND_ACK_TIMEOUT_MS = parseInt(process.env.SEND_ACK_TIMEOUT_MS, 10) || 0;
 const SOFT_RESTART_COOLDOWN_SECONDS = parseInt(process.env.SOFT_RESTART_COOLDOWN_SECONDS, 10) || 300;
 const softRestartCooldown = new NodeCache();
 const pendingAcks = new Map(); // messageId -> { timeout, jid }
@@ -106,6 +109,7 @@ const clearPendingSend = (id) => {
 };
 
 const registerPendingSend = (key) => {
+  if (SEND_ACK_TIMEOUT_MS <= 0) return;
   if (!key?.id) return;
   clearPendingSend(key.id);
   const timeout = setTimeout(() => {
