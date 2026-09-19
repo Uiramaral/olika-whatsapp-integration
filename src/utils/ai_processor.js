@@ -35,7 +35,10 @@ async function extractDataForAI(incomingMessage) {
 
     switch (type) {
         case 'conversation':
-            result.payload = messageContent.conversation || '';
+            // Para 'conversation', messageContent JÁ é a string da mensagem.
+            result.payload = typeof messageContent === 'string'
+                ? messageContent
+                : (messageContent?.conversation || '');
             break;
         case 'extendedTextMessage':
             result.payload = messageContent.text || '';
