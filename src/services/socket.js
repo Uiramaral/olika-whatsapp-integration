@@ -863,6 +863,19 @@ const startSock = async (phoneOverride = null) => {
       await sendMessage(senderJid, replyText);
       logger.info(`✅ Resposta da IA (Laravel) enviada para ${senderJid}`);
 
+      // Mensagens extras (ex.: código PIX copia-e-cola) enviadas soltas, para copiar facilmente.
+      const extrasResposta = Array.isArray(iaResponse.data.extras) ? iaResponse.data.extras : [];
+      for (const extra of extrasResposta) {
+        const textoExtra = extra === null || extra === undefined ? '' : String(extra).trim();
+        if (textoExtra !== '') {
+          try {
+            await sendMessage(senderJid, textoExtra);
+          } catch (e) {
+            logger.warn(`⚠️ [IA] Falha ao enviar mensagem extra: ${e.message}`);
+          }
+        }
+      }
+
     } catch (error) {
       logger.error(`❌ ERRO NO FLUXO DE ORQUESTRAÇÃO: ${error.message}`);
       try {
