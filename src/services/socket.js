@@ -818,6 +818,21 @@ const startSock = async (phoneOverride = null) => {
         return; // não chama a IA
       }
 
+      // 📷 MÍDIA (foto/vídeo/documento): notifica o admin (ignorando cooldown) e segue para a IA.
+      if (type === 'imagem' || type === 'documento') {
+        const isAdminMidia = adminPhoneClean && senderPhone && senderPhone.endsWith(adminPhoneClean.slice(-8));
+        if (!isAdminMidia && adminPhoneClean) {
+          const rotulo = type === 'imagem' ? 'Imagem/Foto' : 'Documento';
+          const alertaMidia = `🔔 *${rotulo} recebido no WhatsApp da Olika*\n\n` +
+            `👤 *Cliente:* ${incomingMessage.pushName || 'Cliente'} (${senderPhone})\n` +
+            `📎 _A IA não lê este tipo de mídia. Atenda manualmente se necessário._`;
+          sendMessage(adminPhoneClean, alertaMidia)
+            .then(() => logger.info('✅ [Mídia] Administrador notificado (ignorando cooldown).'))
+            .catch((err) => logger.warn(`⚠️ [Mídia] Falha ao notificar admin: ${err.message}`));
+        }
+        // não retorna: a IA ainda responde com o texto/caption disponível
+      }
+
       // 🤖 Texto/PDF: quem responde é o Laravel (DeepSeek/Gemini)
       const phoneNumber = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
       const responderUrl = IA_RESPONDER_URL;

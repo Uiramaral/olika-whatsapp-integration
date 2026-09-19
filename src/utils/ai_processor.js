@@ -56,6 +56,7 @@ async function extractDataForAI(incomingMessage) {
                     result.payload = `[Erro ao processar PDF]. Instrução: Avise o usuário que houve um erro ao processar o documento.`;
                 }
             } else {
+                result.type = 'documento';
                 result.payload = `[Documento recebido]. Instrução: Avise o usuário que você só processa texto e PDFs.`;
             }
             break;
@@ -69,6 +70,7 @@ async function extractDataForAI(incomingMessage) {
 
         case 'imageMessage':
         case 'videoMessage':
+            result.type = 'imagem';
             let captionText = messageContent.caption || '';
             let advisoryText = `[MÍDIA VISUAL RECEBIDA: ${type.replace('Message', '').toUpperCase()}]. `;
             
