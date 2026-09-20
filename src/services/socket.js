@@ -1010,18 +1010,45 @@ const disconnectSock = async () => {
 })();
 
 // --- Exportações ---
+
+// Variações do número brasileiro com/sem o 9º dígito (DDI 55 + DDD + assinante).
+// O WhatsApp pode ter o contato salvo em um dos formatos; testamos ambos antes de falhar.
+const variacoesNumeroWhatsApp = (cleanPhone) => {
+  const variacoes = [cleanPhone];
+
+  if (String(cleanPhone).startsWith('55')) {
+    // 55 + DDD(2) + 9 + 8 dígitos = 13 → tentar a variação sem o 9º dígito
+    if (cleanPhone.length === 13 && cleanPhone[4] === '9') {
+      variacoes.push(cleanPhone.slice(0, 4) + cleanPhone.slice(5));
+    }
+    // 55 + DDD(2) + 8 dígitos = 12 → tentar a variação com o 9º dígito (só celular)
+    else if (cleanPhone.length === 12 && ['6', '7', '8', '9'].includes(cleanPhone[4])) {
+      variacoes.push(cleanPhone.slice(0, 4) + '9' + cleanPhone.slice(4));
+    }
+  }
+
+  return variacoes;
+};
+
 const sendMessage = async (phone, message) => {
   if (!globalSock || !isSocketConnected) throw new Error("Offline");
 
   // 🚨 AJUSTE DE ROBUSTEZ: Captura erros de envio
   try {
     const cleanPhone = phone.replace(/\D/g, "");
-    const checkJid = cleanPhone.includes("@s.whatsapp.net") ? cleanPhone : `${cleanPhone}@s.whatsapp.net`;
-    const [result] = await globalSock.onWhatsApp(checkJid);
 
-    if (!result?.exists) throw new Error("Número inválido no WhatsApp");
+    let destinoJid = null;
+    for (const variacao of variacoesNumeroWhatsApp(cleanPhone)) {
+      const [result] = await globalSock.onWhatsApp(`${variacao}@s.whatsapp.net`);
+      if (result?.exists) {
+        destinoJid = result.jid;
+        break;
+      }
+    }
 
-    const sent = await globalSock.sendMessage(result.jid, { text: message });
+    if (!destinoJid) throw new Error("Número inválido no WhatsApp");
+
+    const sent = await globalSock.sendMessage(destinoJid, { text: message });
 
     // 📦 Guarda para retry (getMessage) e monitora confirmação de entrega
     storeMessage(sent?.key, sent?.message);
