@@ -89,6 +89,12 @@ const lidToJidMap = new Map();
 // Reative com SEND_ACK_TIMEOUT_MS=<ms> se quiser o gatilho por ack.
 const SEND_ACK_TIMEOUT_MS = parseInt(process.env.SEND_ACK_TIMEOUT_MS, 10) || 0;
 const SOFT_RESTART_COOLDOWN_SECONDS = parseInt(process.env.SOFT_RESTART_COOLDOWN_SECONDS, 10) || 300;
+
+// ⏱️ Intervalo humanizado entre as mensagens do mesmo turno do agente (resposta principal + extras).
+// Padrão: 5s. Ajustável por IA_MESSAGE_DELAY_MS.
+const IA_MESSAGE_DELAY_MS = parseInt(process.env.IA_MESSAGE_DELAY_MS, 10) || 5000;
+const delayMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const softRestartCooldown = new NodeCache();
 const pendingAcks = new Map(); // messageId -> { timeout, jid }
 let isSoftRestarting = false;
@@ -864,10 +870,14 @@ const startSock = async (phoneOverride = null) => {
       logger.info(`✅ Resposta da IA (Laravel) enviada para ${senderJid}`);
 
       // Mensagens extras (ex.: código PIX copia-e-cola) enviadas soltas, para copiar facilmente.
+      // Intervalo humanizado entre as mensagens do mesmo turno (uma de cada vez, ~5s por padrão).
       const extrasResposta = Array.isArray(iaResponse.data.extras) ? iaResponse.data.extras : [];
       for (const extra of extrasResposta) {
         const textoExtra = extra === null || extra === undefined ? '' : String(extra).trim();
         if (textoExtra !== '') {
+          if (IA_MESSAGE_DELAY_MS > 0) {
+            await delayMs(IA_MESSAGE_DELAY_MS);
+          }
           try {
             await sendMessage(senderJid, textoExtra);
           } catch (e) {
