@@ -61,10 +61,54 @@ const getStoredMessage = (key) => {
 };
 
 const adminNotifyCooldownCache = new NodeCache();
-
 // 📲 Notificação ao Administrador (celular que recebe alerta quando um cliente manda msg)
 const ADMIN_NOTIFY_PHONE = process.env.ADMIN_NOTIFY_PHONE || '5571981750546';
 const ADMIN_NOTIFY_COOLDOWN = parseInt(process.env.ADMIN_NOTIFY_COOLDOWN, 10) || 1800; // 30 minutos de silêncio por cliente
+
+// 💾 Cooldown persistido: sobrevive a reinícios do serviço (o cache em memória não sobrevive).
+const ADMIN_COOLDOWN_FILE = path.join(BASE_AUTH_DIR, 'admin_notify_cooldown.json');
+
+const lerCooldownsAdmin = () => {
+  try {
+    if (fs.existsSync(ADMIN_COOLDOWN_FILE)) {
+      return JSON.parse(fs.readFileSync(ADMIN_COOLDOWN_FILE, 'utf8')) || {};
+    }
+  } catch (e) {
+    logger.warn(`⚠️ [Alerta Admin] Falha ao ler cooldown persistido: ${e.message}`);
+  }
+  return {};
+};
+
+const gravarCooldownsAdmin = (mapa) => {
+  try {
+    fs.writeFileSync(ADMIN_COOLDOWN_FILE, JSON.stringify(mapa), 'utf8');
+  } catch (e) {
+    logger.warn(`⚠️ [Alerta Admin] Falha ao gravar cooldown persistido: ${e.message}`);
+  }
+};
+
+// Retorna true quando o contato ainda está em período de silêncio.
+const emCooldownAdmin = (chaveContato) => {
+  const agora = Date.now();
+  const mapa = lerCooldownsAdmin();
+  let alterou = false;
+
+  for (const [chave, expiraEm] of Object.entries(mapa)) {
+    if (!expiraEm || expiraEm <= agora) {
+      delete mapa[chave];
+      alterou = true;
+    }
+  }
+  if (alterou) gravarCooldownsAdmin(mapa);
+
+  return Boolean(mapa[chaveContato] && mapa[chaveContato] > agora);
+};
+
+const registrarCooldownAdmin = (chaveContato) => {
+  const mapa = lerCooldownsAdmin();
+  mapa[chaveContato] = Date.now() + (ADMIN_NOTIFY_COOLDOWN * 1000);
+  gravarCooldownsAdmin(mapa);
+};
 
 let globalSock = null;
 let isSocketConnected = false;
@@ -621,11 +665,13 @@ const startSock = async (phoneOverride = null) => {
 
     // Evita loop se a mensagem for enviada pelo próprio administrador
     if (adminPhoneClean && cleanSenderPhone && !cleanSenderPhone.endsWith(adminPhoneClean.slice(-8))) {
+      // Chave por contato normalizado: o mesmo cliente (número ou LID mapeado) conta como um só.
       const cooldownKey = `admin_notif_${cleanSenderPhone}`;
-      const jaNotificado = adminNotifyCooldownCache.get(cooldownKey);
+      const jaNotificado = emCooldownAdmin(cooldownKey) || adminNotifyCooldownCache.get(cooldownKey);
 
       if (!jaNotificado) {
-        // Armazena no cache pelo período do cooldown (padrão 30 min)
+        // Persiste o cooldown (sobrevive a reinício) e mantém o cache em memória como reforço
+        registrarCooldownAdmin(cooldownKey);
         adminNotifyCooldownCache.set(cooldownKey, true, ADMIN_NOTIFY_COOLDOWN);
 
         const pushName = incomingMessage.pushName || 'Cliente';
