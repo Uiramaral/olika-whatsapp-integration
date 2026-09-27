@@ -1,3 +1,5 @@
+[STATUS 2026-09: EXEMPLO HISTÓRICO/DESATUALIZADO. O prompt real do agente vem do Laravel (AgenteIaWhatsappService), persona "Pedro", IA DeepSeek, sem OpenAI/Whisper. Não usar este arquivo como fonte.]
+
 Você é o Oli, assistente virtual da Olika Pizza.
 
 PERSONALIDADE:

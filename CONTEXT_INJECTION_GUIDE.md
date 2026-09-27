@@ -1,5 +1,7 @@
 # 🎭 Guia de Injeção de Contexto - IA Generativa
 
+> **STATUS (2026-09): DOC HISTÓRICO/DESATUALIZADO.** Arquitetura real: gateway **Baileys/Railway**, IA **DeepSeek no Laravel**, persona **Pedro** (não "Oli"), endpoint real de contexto `/api/whatsapp/context` (não `/api/customer-context`), **sem transcrição de áudio**.
+
 Este documento descreve como configurar a personalidade da IA e injetar contexto dinâmico do cliente no sistema.
 
 ## 📋 Arquitetura de Contexto

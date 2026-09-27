@@ -1,5 +1,7 @@
 # 🚨 Configuração de Controle Condicional da IA
 
+> **STATUS (2026-09): DOC HISTÓRICO/DESATUALIZADO.** Arquitetura real: gateway **Baileys/Railway** (Evolution **não implantado**), IA **DeepSeek no Laravel** (sem OpenAI/Whisper), **sem transcrição de áudio** (o agente avisa o cliente e notifica a equipe), persona **Pedro**, endpoints reais `/api/whatsapp/ia/status` e `/api/whatsapp/ia/responder` (não `/api/ai-status`).
+
 Este documento descreve a implementação do sistema de controle condicional da IA, onde o Gateway Node.js consulta o estado do Laravel antes de processar mensagens com IA.
 
 ## 📋 Arquitetura

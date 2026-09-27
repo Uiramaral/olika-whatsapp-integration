@@ -139,6 +139,9 @@ const SOFT_RESTART_COOLDOWN_SECONDS = parseInt(process.env.SOFT_RESTART_COOLDOWN
 const IA_MESSAGE_DELAY_MS = parseInt(process.env.IA_MESSAGE_DELAY_MS, 10) || 5000;
 const delayMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// ⏱️ Timeout (ms) do POST para o Laravel (turno da IA). Cobre as tentativas do provedor principal.
+const IA_RESPONSE_TIMEOUT_MS = parseInt(process.env.IA_RESPONSE_TIMEOUT_MS, 10) || 45000;
+
 const softRestartCooldown = new NodeCache();
 const pendingAcks = new Map(); // messageId -> { timeout, jid }
 let isSoftRestarting = false;
@@ -701,42 +704,7 @@ const startSock = async (phoneOverride = null) => {
       }
     }
 
-    // 🚨 INTEGRAÇÃO COM N8N: Se N8N_WEBHOOK_URL estiver configurada no Railway (ou via fallback), desvia o fluxo para o n8n
-    const n8nUrl = process.env.N8N_WEBHOOK_URL || "https://n8n-production-e19d.up.railway.app/webhook-test/d10aac8e-455d-4345-94a3-54a33bec56ff";
-    if (n8nUrl) {
-      logger.info(`📡 [N8N] Encaminhando mensagem de ${senderPhone} para o n8n...`);
-      
-      const deQuem = senderJid ? senderJid.split('@')[0] : '';
-      const textoMensagem = incomingMessage.message?.conversation || 
-                            incomingMessage.message?.extendedTextMessage?.text || 
-                            '[Mídia/Outro]';
-        
-      const webhookPayload = {
-        client_id: CLIENT_ID, // Mantido para referência interna
-        instance_phone: currentPhone,
-        number: deQuem, // Apenas o número de telefone puro (ex: 5571999999999)
-        jid: senderJid, // JID completo caso o n8n precise de @s.whatsapp.net ou @lid
-        text: textoMensagem,
-        pushName: incomingMessage.pushName || 'Desconhecido',
-        message_id: incomingMessage.key.id,
-        raw_message: incomingMessage // Mantido para o n8n poder acessar botões, reações, etc. se necessário
-      };
-
-      // Dispara para o n8n
-      axios.post(n8nUrl, webhookPayload)
-        .then(() => logger.info(`🚀 [n8n Webhook] Dados enviados com sucesso para o n8n!`))
-        .catch((e) => {
-          const status = e.response?.status;
-          const statusText = e.response?.statusText;
-          const responseData = e.response?.data ? JSON.stringify(e.response.data) : '';
-          
-          if (status === 404) {
-            logger.warn(`⚠️ [n8n Webhook] Erro 404: O n8n não está ouvindo eventos de teste no momento. No painel do n8n, clique em "Listen for test event" (ou "Test step") antes de enviar a mensagem, ou ative (Active) o workflow de produção.`);
-          } else {
-            logger.error(`❌ [n8n Webhook] Erro ao enviar para o n8n. Status: ${status || 'N/A'} (${statusText || 'N/A'}). Detalhes: ${responseData || e.message}`);
-          }
-        });
-    }
+    // Encaminhamento paralelo (n8n) removido: o fluxo é exclusivamente o oficial (Laravel).
 
     // 🚨 NOVO: Atualização automática de nome se o pushName for válido e o banco tiver "Cliente"
     const pushNameAtual = incomingMessage.pushName || '';
@@ -902,22 +870,30 @@ const startSock = async (phoneOverride = null) => {
           'X-API-Token': WH_API_TOKEN,
           'Content-Type': 'application/json'
         },
-        timeout: 25000
+        timeout: IA_RESPONSE_TIMEOUT_MS
       });
 
       const replyText = iaResponse.data && iaResponse.data.resposta;
+      // Mensagens extras (ex.: código PIX copia-e-cola) enviadas soltas, para copiar facilmente.
+      const extrasResposta = Array.isArray(iaResponse.data.extras) ? iaResponse.data.extras : [];
 
-      if (!replyText || iaResponse.data.allowlist === false) {
-        logger.info(`🚫 [IA] Sem resposta para ${senderJid} (allowlist/indisponível).`);
+      if (iaResponse.data.allowlist === false) {
+        logger.info(`🚫 [IA] Sem resposta para ${senderJid} (allowlist).`);
         return;
       }
 
-      await sendMessage(senderJid, replyText);
-      logger.info(`✅ Resposta da IA (Laravel) enviada para ${senderJid}`);
+      // Só considera "sem resposta" quando não há texto NEM extras (ex.: resposta com só o PIX).
+      if (!replyText && extrasResposta.length === 0) {
+        logger.info(`🚫 [IA] Sem resposta para ${senderJid} (indisponível).`);
+        return;
+      }
 
-      // Mensagens extras (ex.: código PIX copia-e-cola) enviadas soltas, para copiar facilmente.
+      if (replyText) {
+        await sendMessage(senderJid, replyText);
+        logger.info(`✅ Resposta da IA (Laravel) enviada para ${senderJid}`);
+      }
+
       // Intervalo humanizado entre as mensagens do mesmo turno (uma de cada vez, ~5s por padrão).
-      const extrasResposta = Array.isArray(iaResponse.data.extras) ? iaResponse.data.extras : [];
       for (const extra of extrasResposta) {
         const textoExtra = extra === null || extra === undefined ? '' : String(extra).trim();
         if (textoExtra !== '') {
