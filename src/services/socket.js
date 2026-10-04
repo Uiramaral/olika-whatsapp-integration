@@ -358,7 +358,7 @@ const checkAiStatus = async (senderJid) => {
         'X-API-Token': WH_API_TOKEN,
         'Content-Type': 'application/json'
       },
-      timeout: 5000
+      timeout: 8000
     });
 
     const isEnabled = response.data.status === 'enabled';
