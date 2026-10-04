@@ -778,10 +778,17 @@ const startSock = async (phoneOverride = null) => {
         ai_disabled: true,
         message_type: messageType,
         push_name: pushName,
-        message_id: incomingMessage.key.id // ID único para deduplicação
+        message_id: incomingMessage.key.id, // ID único para deduplicação
+        token: WH_API_TOKEN
       };
       logger.info(`📡 [WEBHOOK] Enviando para Laravel (IA desabilitada)`, { url: WEBHOOK_URL, phone: webhookPayload.phone });
-      axios.post(WEBHOOK_URL, webhookPayload)
+      axios.post(WEBHOOK_URL, webhookPayload, {
+        headers: {
+          'X-API-Token': WH_API_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        timeout: 5000
+      })
         .then(() => logger.info(`✅ [WEBHOOK] Enviado com sucesso para Laravel`))
         .catch((e) => logger.error('❌ [WEBHOOK] Erro ao enviar para Laravel:', e.message));
       return;
@@ -805,10 +812,17 @@ const startSock = async (phoneOverride = null) => {
       ai_disabled: false,
       message_type: messageTypePreview,
       push_name: pushNamePreview,
-      message_id: incomingMessage.key.id // ID único para deduplicação
+      message_id: incomingMessage.key.id, // ID único para deduplicação
+      token: WH_API_TOKEN
     };
     logger.info(`📡 [WEBHOOK] Enviando para Laravel (IA habilitada - pré-processamento)`, { url: WEBHOOK_URL, phone: webhookPayloadAi.phone });
-    axios.post(WEBHOOK_URL, webhookPayloadAi)
+    axios.post(WEBHOOK_URL, webhookPayloadAi, {
+      headers: {
+        'X-API-Token': WH_API_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      timeout: 5000
+    })
       .then(() => logger.info(`✅ [WEBHOOK] Pré-notificação enviada com sucesso para Laravel`))
       .catch((e) => logger.warn('⚠️ [WEBHOOK] Erro ao pré-notificar Laravel:', e.message));
 
