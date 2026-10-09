@@ -113,6 +113,7 @@ const registrarCooldownAdmin = (chaveContato) => {
 let globalSock = null;
 let isSocketConnected = false;
 let currentPhone = null;
+let disconnectWebhookTimer = null;
 
 // 🔥 Contador de falhas e limite
 let consecutiveFailures = 0;
@@ -437,6 +438,7 @@ const startSock = async (phoneOverride = null) => {
       return msg;
     },
     connectTimeoutMs: 90000,
+    keepAliveIntervalMs: 25000,
     retryRequestDelayMs: 2000,
     defaultQueryTimeoutMs: 60000,
     // 🔑 CRÍTICO: retorna a mensagem original do store para permitir o retry de
@@ -502,6 +504,12 @@ const startSock = async (phoneOverride = null) => {
       global.currentPairingCode = null;
       consecutiveFailures = 0;
 
+      // Cancela webhook pendente de desconexão se reconectou dentro da janela de debounce
+      if (disconnectWebhookTimer) {
+        clearTimeout(disconnectWebhookTimer);
+        disconnectWebhookTimer = null;
+      }
+
       // Evita timeouts obsoletos de envios da sessão anterior
       pendingAcks.forEach((entry) => clearTimeout(entry.timeout));
       pendingAcks.clear();
@@ -520,8 +528,8 @@ const startSock = async (phoneOverride = null) => {
       global.isConnecting = false; // ✅ Libera o flag global em qualquer desconexão
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
 
-      // Erros comuns e esperados durante pareamento e restarts do WhatsApp Web
-      const isTransientOrPairing = [500, 515, 408, 428].includes(reason) || isPairingInProgress || !sock.authState.creds.registered;
+      // Erros comuns e esperados durante pareamento e restarts do WhatsApp Web (Meta)
+      const isTransientOrPairing = [500, 515, 408, 428, 503].includes(reason) || isPairingInProgress || !sock.authState.creds.registered;
 
       if (isTransientOrPairing) {
         console.log(`⚠️ Desconexão transitória ou de pareamento (${reason}). Mantendo credenciais.`);
@@ -530,16 +538,27 @@ const startSock = async (phoneOverride = null) => {
         console.log(`🔴 Desconectado (${reason}). Falhas consecutivas: ${consecutiveFailures}/5.`);
       }
 
-      // Webhook de Status para o Laravel
-      axios.post(WEBHOOK_URL, {
-        client_id: CLIENT_ID,
-        type: 'connection_update',
-        instance_phone: currentPhone,
-        status: 'DISCONNECTED'
-      }).catch(() => { });
+      // Webhook de Status para o Laravel com debounce (8s) para amortecer reconexões transitórias
+      if (disconnectWebhookTimer) {
+        clearTimeout(disconnectWebhookTimer);
+      }
+      disconnectWebhookTimer = setTimeout(() => {
+        if (!isSocketConnected) {
+          axios.post(WEBHOOK_URL, {
+            client_id: CLIENT_ID,
+            type: 'connection_update',
+            instance_phone: currentPhone,
+            status: 'DISCONNECTED'
+          }).catch(() => { });
+        }
+      }, 8000);
 
       // LOGOUT MANUAL DETECTADO (401) OU LIMITE DE 5 FALHAS CONSECUTIVAS EM PRODUÇÃO
       if (reason === DisconnectReason.loggedOut || consecutiveFailures >= 5) {
+        if (disconnectWebhookTimer) {
+          clearTimeout(disconnectWebhookTimer);
+          disconnectWebhookTimer = null;
+        }
         console.error("🚨 SESSÃO ENCERRADA (Logout ou Falha Persistente). Resetando credenciais...");
 
         // Notifica o Laravel
@@ -1079,9 +1098,14 @@ const variacoesNumeroWhatsApp = (cleanPhone) => {
 const sendMessage = async (phone, message) => {
   if (!globalSock || !isSocketConnected) throw new Error("Offline");
 
-  // 🚨 AJUSTE DE ROBUSTEZ: Captura erros de envio
   try {
-    const cleanPhone = phone.replace(/\D/g, "");
+    const cleanPhone = phone ? String(phone).replace(/\D/g, "") : "";
+
+    // 🛡️ Prevenção contra números sentinelas ou vazios (evita erros Signal no WhatsApp Web)
+    if (!cleanPhone || cleanPhone.length < 10 || cleanPhone === '11999999999' || cleanPhone === '5511999999999') {
+      logger.warn(`⚠️ [sendMessage] Destinatário inválido ou sentinela ignorado: ${phone}`);
+      throw new Error("Número inválido ou sentinela no WhatsApp");
+    }
 
     let destinoJid = null;
     for (const variacao of variacoesNumeroWhatsApp(cleanPhone)) {
