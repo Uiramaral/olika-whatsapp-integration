@@ -630,6 +630,13 @@ const startSock = async (phoneOverride = null) => {
       return;
     }
 
+    // 🚫 Filtro de Reações: se for reação com emoji em mensagem existente, ignora completamente (faz nada)
+    const rawMessageType = getContentType(incomingMessage.message);
+    if (rawMessageType === 'reactionMessage' || incomingMessage.message?.reactionMessage) {
+      logger.info(`⏭️ [FILTRO REAÇÃO] Reação recebida de ${senderJidRaw}. Ignorando silenciosamente.`);
+      return;
+    }
+
     // 🗺️ RESOLUÇÃO DE LID: O WhatsApp usa LIDs no protocolo multi-device
     // Mensagens de números externos chegam com @lid em vez de @s.whatsapp.net
     // Tentamos resolver via mapa; se não encontrado, processamos assim mesmo com log

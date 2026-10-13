@@ -82,6 +82,11 @@ async function extractDataForAI(incomingMessage) {
             result.payload = advisoryText;
             break;
 
+        case 'reactionMessage':
+            result.type = 'reaction';
+            result.payload = '';
+            break;
+
         default:
             result.payload = `Mensagem do tipo ${type} recebida. Instrução: Avise o usuário que este tipo de mensagem não é processado.`;
             break;
