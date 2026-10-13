@@ -87,13 +87,51 @@ async function extractDataForAI(incomingMessage) {
             result.payload = '';
             break;
 
+        case 'orderMessage':
+            result.type = 'pedido_catalogo';
+            result.orderId = messageContent.orderId || '';
+            result.orderToken = messageContent.token || '';
+            result.payload = formatOrderMessagePayload(messageContent, incomingMessage._orderDetails || null);
+            break;
+
         default:
-            result.payload = `Mensagem do tipo ${type} recebida. Instrução: Avise o usuário que este tipo de mensagem não é processado.`;
+            logger.info(`ℹ️ [AI Processor] Mensagem do tipo "${type}" ignorada (sem conteúdo de texto).`);
+            result.payload = '';
             break;
     }
     
     return result; 
 }
 
-module.exports = { extractDataForAI };
+function formatOrderMessagePayload(messageContent, details) {
+    const orderId = messageContent?.orderId || '';
+    const itemCount = messageContent?.itemCount || 0;
+    const note = messageContent?.message || '';
+    const totalRaw = messageContent?.totalAmount1000 ? (Number(messageContent.totalAmount1000) / 1000) : 0;
+    const total = totalRaw.toFixed(2);
+
+    let lines = [`[PEDIDO VIA CATÁLOGO DO WHATSAPP]`];
+
+    if (details && Array.isArray(details.products) && details.products.length > 0) {
+        lines.push(`Itens do Catálogo:`);
+        details.products.forEach(p => {
+            const qtd = p.quantity || 1;
+            const preco = (p.price ? (Number(p.price) / 1000) : 0).toFixed(2);
+            lines.push(`- ${qtd}x ${p.name || 'Produto'} (R$ ${preco} cada)`);
+        });
+    } else {
+        lines.push(`Quantidade de itens selecionados no catálogo: ${itemCount}`);
+    }
+
+    lines.push(`Subtotal do Catálogo: R$ ${total}`);
+    if (note) {
+        lines.push(`Observação do cliente: "${note}"`);
+    }
+
+    lines.push(`\nInstrução: O cliente enviou um carrinho do catálogo nativo do WhatsApp. Acolha com entusiasmo, confirme os itens e pergunte se deseja entrega ou retirada (e se entrega, solicite o endereço/CEP para calcular a taxa).`);
+
+    return lines.join('\n');
+}
+
+module.exports = { extractDataForAI, formatOrderMessagePayload };
 

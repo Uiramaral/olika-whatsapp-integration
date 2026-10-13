@@ -630,10 +630,33 @@ const startSock = async (phoneOverride = null) => {
       return;
     }
 
-    // 🚫 Filtro de Reações: se for reação com emoji em mensagem existente, ignora completamente (faz nada)
-    const rawMessageType = getContentType(incomingMessage.message);
-    if (rawMessageType === 'reactionMessage' || incomingMessage.message?.reactionMessage) {
-      logger.info(`⏭️ [FILTRO REAÇÃO] Reação recebida de ${senderJidRaw}. Ignorando silenciosamente.`);
+    // 🚫 Filtro de Mensagens Técnicas / Protocolo / Reações do WhatsApp:
+    // Ignora eventos que não representam mensagens reais enviadas por um ser humano:
+    // protocolMessage (exclusão, sincronização, chaves), senderKeyDistributionMessage (chaves E2EE),
+    // reactionMessage (reação com emoji), deviceSentMessage, etc.
+    const rawMessageType = getContentType(incomingMessage.message) || '';
+    const internalProtocolTypes = [
+      'protocolMessage',
+      'senderKeyDistributionMessage',
+      'fastRatchetKeySenderKeyDistributionMessage',
+      'messageContextInfo',
+      'deviceSentMessage',
+      'deviceListMetadata',
+      'keyExchangeMessage',
+      'reactionMessage',
+      'pollUpdateMessage',
+      'keepInChatMessage',
+      'bcallMessage'
+    ];
+
+    if (
+      internalProtocolTypes.includes(rawMessageType) ||
+      incomingMessage.message?.reactionMessage ||
+      incomingMessage.message?.protocolMessage ||
+      incomingMessage.message?.senderKeyDistributionMessage ||
+      incomingMessage.message?.deviceSentMessage
+    ) {
+      logger.info(`⏭️ [FILTRO PROTOCOLO] Mensagem técnica/interna do WhatsApp (${rawMessageType}) de ${senderJidRaw}. Ignorando silenciosamente.`);
       return;
     }
 
@@ -706,7 +729,8 @@ const startSock = async (phoneOverride = null) => {
         const pushName = incomingMessage.pushName || 'Cliente';
         const msgRaw = incomingMessage.message?.conversation ||
                        incomingMessage.message?.extendedTextMessage?.text ||
-                       (incomingMessage.message?.imageMessage ? '[📷 Foto/Imagem]' :
+                       (incomingMessage.message?.orderMessage ? '[🛒 Pedido do Catálogo WhatsApp]' :
+                        incomingMessage.message?.imageMessage ? '[📷 Foto/Imagem]' :
                         incomingMessage.message?.audioMessage ? '[🎵 Mensagem de Áudio]' :
                         incomingMessage.message?.documentMessage ? '[📄 Documento]' :
                         '[Mídia/Arquivo]');
@@ -826,7 +850,7 @@ const startSock = async (phoneOverride = null) => {
     // 🚨 Notificar Laravel da mensagem com IA ativa (para salvar no banco ANTES da resposta)
     const textPreview = incomingMessage.message?.conversation ||
       incomingMessage.message?.extendedTextMessage?.text ||
-      '[Mensagem sem texto]';
+      (incomingMessage.message?.orderMessage ? '[🛒 Pedido do Catálogo WhatsApp]' : '[Mensagem sem texto]');
     const messageTypePreview = getContentType(incomingMessage.message) || 'unknown';
     const pushNamePreview = incomingMessage.pushName || null;
     const webhookPayloadAi = {
@@ -853,8 +877,30 @@ const startSock = async (phoneOverride = null) => {
       .catch((e) => logger.warn('⚠️ [WEBHOOK] Erro ao pré-notificar Laravel:', e.message));
 
     try {
-      // Extrai dados (texto/pdf/mídia). Áudio NÃO é transcrito (tratado abaixo).
+      // 🛒 Se for pedido do Catálogo do WhatsApp (orderMessage), tenta enriquecer com getOrderDetails
+      if (incomingMessage.message?.orderMessage) {
+        const oMsg = incomingMessage.message.orderMessage;
+        if (oMsg.orderId && oMsg.token && typeof sock.getOrderDetails === 'function') {
+          try {
+            logger.info(`🛒 [Catálogo] Consultando itens da ordem ${oMsg.orderId} no WhatsApp...`);
+            const detailsPromise = sock.getOrderDetails(oMsg.orderId, oMsg.token);
+            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 3500));
+            incomingMessage._orderDetails = await Promise.race([detailsPromise, timeoutPromise]);
+            logger.info(`✅ [Catálogo] Ordem ${oMsg.orderId} carregada com ${incomingMessage._orderDetails?.products?.length || 0} produto(s).`);
+          } catch (eOrder) {
+            logger.warn(`⚠️ [Catálogo] getOrderDetails indisponível ou expirou: ${eOrder.message}. Usando dados resumidos.`);
+          }
+        }
+      }
+
+      // Extrai dados (texto/pdf/mídia/pedido). Áudio NÃO é transcrito (tratado abaixo).
       const { payload, type } = await extractDataForAI(incomingMessage);
+
+      // Se não houver texto/conteúdo real para processamento, não envia para a IA
+      if (!payload || !payload.trim()) {
+        logger.info(`⏭️ [IA] Mensagem de ${senderJid} sem conteúdo processável (tipo: ${type}). Ignorando.`);
+        return;
+      }
 
       // 🎵 ÁUDIO: a IA não ouve. Notifica o admin (ignorando cooldown) e avisa o cliente.
       if (type === 'audio') {
