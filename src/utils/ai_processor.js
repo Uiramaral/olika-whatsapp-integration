@@ -11,6 +11,18 @@ if (!fs.existsSync(TEMP_DIR)) {
     fs.mkdirSync(TEMP_DIR, { recursive: true });
 }
 
+// Limite local da imagem enviada ao Laravel/IA (padrão 2 MiB).
+const IMAGE_MAX_BYTES = Math.max(1, parseInt(process.env.IA_IMAGE_MAX_BYTES, 10) || (2 * 1024 * 1024));
+const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
+
+const AVISO_IMAGEM_NAO_PROCESSADA = '[IMAGEM RECEBIDA, MAS NÃO PROCESSADA] Instrução: peça ao cliente para descrever o conteúdo em texto e informe que a equipe foi notificada.';
+const AVISO_VIDEO = '[VÍDEO RECEBIDO] Instrução: avise que você não analisa vídeos e peça uma descrição em texto ou uma foto.';
+
+function mimeImagemSuportado(mimetype) {
+    const mime = String(mimetype || '').toLowerCase().split(';')[0].trim();
+    return IMAGE_MIMES.includes(mime) ? mime : null;
+}
+
 // 1. Baixa a mídia do WhatsApp para Buffer (MEMÓRIA)
 async function mediaToBuffer(messageContent) {
     try {
@@ -27,7 +39,7 @@ async function mediaToBuffer(messageContent) {
     }
 }
 
-// 3. Função Principal para Extrair o Conteúdo para o GPT-5-nano
+// 3. Função Principal para Extrair o Conteúdo para a IA
 async function extractDataForAI(incomingMessage) {
     const type = getContentType(incomingMessage.message);
     const messageContent = incomingMessage.message[type];
@@ -68,19 +80,54 @@ async function extractDataForAI(incomingMessage) {
             result.payload = '[MENSAGEM DE ÁUDIO]';
             break;
 
-        case 'imageMessage':
-        case 'videoMessage':
+        case 'imageMessage': {
             result.type = 'imagem';
-            let captionText = messageContent.caption || '';
-            let advisoryText = `[MÍDIA VISUAL RECEBIDA: ${type.replace('Message', '').toUpperCase()}]. `;
-            
-            if (captionText) {
-                advisoryText += `O usuário escreveu: "${captionText}". Analise apenas este texto, pois o modelo não consegue ver a imagem/vídeo.`;
-            } else {
-                advisoryText += `O modelo de IA não possui Visão. Solicite ao usuário que descreva o arquivo.`;
+            const captionText = String(messageContent.caption || '').trim();
+            result.payload = captionText;
+
+            // Aceita apenas formatos que a IA entende; se não houver mimetype, tenta JPEG.
+            let mime = mimeImagemSuportado(messageContent.mimetype);
+            if (!mime && !messageContent.mimetype) {
+                mime = 'image/jpeg';
             }
-            result.payload = advisoryText;
+
+            if (!mime) {
+                result.imageError = 'mime_nao_suportado';
+            } else {
+                try {
+                    const buffer = await mediaToBuffer(incomingMessage.message);
+                    if (!buffer || buffer.length === 0) {
+                        result.imageError = 'imagem_vazia';
+                    } else if (buffer.length > IMAGE_MAX_BYTES) {
+                        result.imageError = 'imagem_grande';
+                    } else {
+                        result.image = {
+                            base64: buffer.toString('base64'),
+                            mime,
+                        };
+                    }
+                } catch (e) {
+                    logger.error(`❌ [AI Processor] Falha ao baixar imagem: ${e.message}`);
+                    result.imageError = 'download_falhou';
+                }
+            }
+
+            if (result.imageError) {
+                result.payload = captionText
+                    ? `${captionText}\n\n${AVISO_IMAGEM_NAO_PROCESSADA}`
+                    : AVISO_IMAGEM_NAO_PROCESSADA;
+            }
             break;
+        }
+
+        case 'videoMessage': {
+            result.type = 'video';
+            const captionVideo = String(messageContent.caption || '').trim();
+            result.payload = captionVideo
+                ? `${captionVideo}\n\n${AVISO_VIDEO}`
+                : AVISO_VIDEO;
+            break;
+        }
 
         case 'reactionMessage':
             result.type = 'reaction';
@@ -110,7 +157,7 @@ function formatOrderMessagePayload(messageContent, details) {
     const totalRaw = messageContent?.totalAmount1000 ? (Number(messageContent.totalAmount1000) / 1000) : 0;
     const total = totalRaw.toFixed(2);
 
-    let lines = [`[PEDIDO VIA CATÁLOGO DO WHATSAPP]`];
+    const lines = [`[PEDIDO VIA CATÁLOGO DO WHATSAPP]`];
 
     if (details && Array.isArray(details.products) && details.products.length > 0) {
         lines.push(`Itens do Catálogo:`);
@@ -134,4 +181,3 @@ function formatOrderMessagePayload(messageContent, details) {
 }
 
 module.exports = { extractDataForAI, formatOrderMessagePayload };
-

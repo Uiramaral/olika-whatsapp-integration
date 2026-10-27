@@ -60,6 +60,18 @@ const getStoredMessage = (key) => {
   return storeKey ? messageStore.get(storeKey) : undefined;
 };
 
+// Prévia textual para webhook/histórico. Nunca inclui base64 nem binário.
+const previewTextoMensagem = (incomingMessage) => {
+  const msg = incomingMessage?.message || {};
+  const captionImagem = String(msg.imageMessage?.caption || '').trim();
+  if (msg.imageMessage) {
+    return captionImagem ? `[Imagem recebida] ${captionImagem}` : '[Imagem recebida]';
+  }
+  return msg.conversation
+    || msg.extendedTextMessage?.text
+    || (msg.orderMessage ? '[🛒 Pedido do Catálogo WhatsApp]' : '[Mensagem sem texto]');
+};
+
 const adminNotifyCooldownCache = new NodeCache();
 // 📲 Notificação ao Administrador (celular que recebe alerta quando um cliente manda msg)
 const ADMIN_NOTIFY_PHONE = process.env.ADMIN_NOTIFY_PHONE || '5571981750546';
@@ -809,9 +821,7 @@ const startSock = async (phoneOverride = null) => {
       logger.info(`🚫 IA desabilitada para ${senderJid} (Controlado pelo Laravel). Ignorando.`);
       // Se a IA está desligada, você pode adicionar um Webhook aqui para logar a mensagem no Laravel ou deixar que um atendente manual trate.
       // Envia webhook apenas para LOG
-      const text = incomingMessage.message?.conversation ||
-        incomingMessage.message?.extendedTextMessage?.text ||
-        '[Mensagem sem texto]';
+      const text = previewTextoMensagem(incomingMessage);
 
       // 💡 Adiciona o tipo de mensagem e pushName para o Laravel
       const messageType = getContentType(incomingMessage.message) || 'unknown';
@@ -848,9 +858,7 @@ const startSock = async (phoneOverride = null) => {
     logger.info(`✅ IA habilitada para ${senderJid}. Iniciando Orquestração de IA...`);
 
     // 🚨 Notificar Laravel da mensagem com IA ativa (para salvar no banco ANTES da resposta)
-    const textPreview = incomingMessage.message?.conversation ||
-      incomingMessage.message?.extendedTextMessage?.text ||
-      (incomingMessage.message?.orderMessage ? '[🛒 Pedido do Catálogo WhatsApp]' : '[Mensagem sem texto]');
+    const textPreview = previewTextoMensagem(incomingMessage);
     const messageTypePreview = getContentType(incomingMessage.message) || 'unknown';
     const pushNamePreview = incomingMessage.pushName || null;
     const webhookPayloadAi = {
@@ -893,12 +901,13 @@ const startSock = async (phoneOverride = null) => {
         }
       }
 
-      // Extrai dados (texto/pdf/mídia/pedido). Áudio NÃO é transcrito (tratado abaixo).
-      const { payload, type } = await extractDataForAI(incomingMessage);
+      // Extrai dados (texto/pdf/imagem/vídeo/pedido). Áudio NÃO é transcrito (tratado abaixo).
+      const { payload, type, image, imageError } = await extractDataForAI(incomingMessage);
+      const temImagem = !!(image && image.base64);
 
-      // Se não houver texto/conteúdo real para processamento, não envia para a IA
-      if (!payload || !payload.trim()) {
-        logger.info(`⏭️ [IA] Mensagem de ${senderJid} sem conteúdo processável (tipo: ${type}). Ignorando.`);
+      // Se não houver texto nem imagem, não envia para a IA.
+      if ((!payload || !payload.trim()) && !temImagem) {
+        logger.info(`⏭️ [IA] Mensagem de ${senderJid} sem conteúdo processável (tipo: ${type}${imageError ? `, imagem: ${imageError}` : ''}). Ignorando.`);
         return;
       }
 
@@ -924,11 +933,11 @@ const startSock = async (phoneOverride = null) => {
         return; // não chama a IA
       }
 
-      // 📷 MÍDIA (foto/vídeo/documento): notifica o admin (ignorando cooldown) e segue para a IA.
-      if (type === 'imagem' || type === 'documento') {
-        const isAdminMidia = adminPhoneClean && senderPhone && senderPhone.endsWith(adminPhoneClean.slice(-8));
+      // 🎬 VÍDEO/DOCUMENTO não processável: notifica o admin (ignorando cooldown) e segue em texto.
+      const isAdminMidia = adminPhoneClean && senderPhone && senderPhone.endsWith(adminPhoneClean.slice(-8));
+      if (type === 'video' || type === 'documento') {
         if (!isAdminMidia && adminPhoneClean) {
-          const rotulo = type === 'imagem' ? 'Imagem/Foto' : 'Documento';
+          const rotulo = type === 'video' ? 'Vídeo' : 'Documento';
           const alertaMidia = `🔔 *${rotulo} recebido no WhatsApp da Olika*\n\n` +
             `👤 *Cliente:* ${incomingMessage.pushName || 'Cliente'} (${senderPhone})\n` +
             `📎 _A IA não lê este tipo de mídia. Atenda manualmente se necessário._`;
@@ -939,7 +948,7 @@ const startSock = async (phoneOverride = null) => {
         // não retorna: a IA ainda responde com o texto/caption disponível
       }
 
-      // 🤖 Texto/PDF: quem responde é o Laravel (DeepSeek/Gemini)
+      // 🤖 Texto/PDF/imagem: quem responde é o Laravel (DeepSeek/Gemini)
       const phoneNumber = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
       const responderUrl = IA_RESPONDER_URL;
 
@@ -947,11 +956,20 @@ const startSock = async (phoneOverride = null) => {
         throw new Error('IA_RESPONDER_URL/WH_API_TOKEN ausentes.');
       }
 
-      const iaResponse = await axios.post(responderUrl, {
-        mensagem: payload,
+      const iaPayload = {
+        mensagem: payload || '',
         telefone: phoneNumber,
         message_id: incomingMessage.key.id
-      }, {
+      };
+      if (temImagem) {
+        iaPayload.imagem_base64 = image.base64;
+        iaPayload.imagem_mime = image.mime;
+      }
+
+      // Nunca loga o base64: apenas o tipo e o resultado da extração.
+      logger.info(`📤 [IA] Enviando para o Laravel (tipo=${type}, imagem=${temImagem ? 'sim' : 'não'}${imageError ? `, erro=${imageError}` : ''})`);
+
+      const iaResponse = await axios.post(responderUrl, iaPayload, {
         headers: {
           'X-API-Token': WH_API_TOKEN,
           'Content-Type': 'application/json'
@@ -966,6 +984,24 @@ const startSock = async (phoneOverride = null) => {
       if (iaResponse.data.allowlist === false) {
         logger.info(`🚫 [IA] Sem resposta para ${senderJid} (allowlist).`);
         return;
+      }
+
+      // Imagem não processada (toggle desligado, modelo sem visão, mídia inválida ou erro do provedor):
+      // mantém o alerta manual ao administrativo, sem o ruído de toda foto processada.
+      if (
+        type === 'imagem' &&
+        iaResponse.data?.imagem_processada !== true &&
+        iaResponse.data?.bloqueado_humano !== true &&
+        iaResponse.data?.duplicada !== true &&
+        !isAdminMidia &&
+        adminPhoneClean
+      ) {
+        const alertaImagem = `🔔 *Imagem recebida no WhatsApp da Olika*\n\n` +
+          `👤 *Cliente:* ${incomingMessage.pushName || 'Cliente'} (${senderPhone})\n` +
+          `📎 _A IA não conseguiu ler esta imagem. Atenda manualmente se necessário._`;
+        sendMessage(adminPhoneClean, alertaImagem)
+          .then(() => logger.info('✅ [Mídia] Administrador notificado (imagem não processada).'))
+          .catch((err) => logger.warn(`⚠️ [Mídia] Falha ao notificar admin: ${err.message}`));
       }
 
       // Só considera "sem resposta" quando não há texto NEM extras (ex.: resposta com só o PIX).
@@ -996,6 +1032,19 @@ const startSock = async (phoneOverride = null) => {
 
     } catch (error) {
       logger.error(`❌ ERRO NO FLUXO DE ORQUESTRAÇÃO: ${error.message}`);
+
+      const eraImagem = !!incomingMessage.message?.imageMessage;
+      const adminCleanFalha = String(ADMIN_NOTIFY_PHONE || '').replace(/\D/g, '');
+      const senderCleanFalha = String(senderPhone || '').replace(/\D/g, '');
+      if (eraImagem && adminCleanFalha && senderCleanFalha && !senderCleanFalha.endsWith(adminCleanFalha.slice(-8))) {
+        const alertaFalha = `🔔 *Imagem recebida no WhatsApp da Olika*\n\n` +
+          `👤 *Cliente:* ${incomingMessage.pushName || 'Cliente'} (${senderPhone})\n` +
+          `📎 _A IA não conseguiu processar esta imagem (falha técnica). Atenda manualmente se necessário._`;
+        sendMessage(adminCleanFalha, alertaFalha)
+          .then(() => logger.info('✅ [Mídia] Administrador notificado (falha ao processar imagem).'))
+          .catch((err) => logger.warn(`⚠️ [Mídia] Falha ao notificar admin: ${err.message}`));
+      }
+
       try {
         await sendMessage(senderJid, "Desculpe, não consegui responder agora. Já avisei a equipe da Olika e logo te retornamos. 🙏");
       } catch (sendError) {
