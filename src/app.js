@@ -446,13 +446,19 @@ app.post('/api/whatsapp/connect', requireAuth, async (req, res) => {
 // Enviar mensagem manualmente
 app.post('/api/whatsapp/send', requireAuth, async (req, res) => {
     try {
-        const { number, message } = req.body;
+        const { number, message, idempotencyKey } = req.body;
         if (!number || !message) {
             return res.status(400).json({ error: 'Número e mensagem são obrigatórios.' });
         }
 
-        const result = await sendMessage(number, message);
-        res.json({ success: true, number, message, messageId: result.messageId });
+        const result = await sendMessage(number, message, { idempotencyKey });
+        res.json({
+            success: true,
+            number,
+            message,
+            messageId: result.messageId,
+            deduplicated: !!result.deduplicated
+        });
     } catch (err) {
         logger.error('Erro ao enviar mensagem:', err);
         res.status(500).json({ error: err.message });
@@ -462,7 +468,7 @@ app.post('/api/whatsapp/send', requireAuth, async (req, res) => {
 // Endpoint simples para envio direto (mantido para compatibilidade)
 app.post('/send-message', requireAuth, async (req, res) => {
     try {
-        const { number, message } = req.body;
+        const { number, message, idempotencyKey } = req.body;
         
         if (!number || !message) {
             return res.status(400).json({ error: 'Campos obrigatórios: number, message' });
@@ -472,7 +478,7 @@ app.post('/send-message', requireAuth, async (req, res) => {
             return res.status(503).json({ error: 'WhatsApp não está conectado. Aguarde a conexão ser estabelecida.' });
         }
 
-        const result = await sendMessage(number, message);
+        const result = await sendMessage(number, message, { idempotencyKey });
         logger.info(`✅ Mensagem enviada para ${number}`);
         res.json(result);
 
@@ -491,7 +497,7 @@ app.post('/send-message', requireAuth, async (req, res) => {
 // POST /message/sendText/:instance
 app.post('/message/sendText/:instance', requireAuth, async (req, res) => {
     try {
-        const { number, text } = req.body;
+        const { number, text, idempotencyKey } = req.body;
         const message = text; // Evolution usa 'text', nosso sistema usa 'message'
         
         if (!number || !message) {
@@ -510,11 +516,12 @@ app.post('/message/sendText/:instance', requireAuth, async (req, res) => {
         }
 
         logger.info(`[Evolution API] Enviando mensagem para ${number} via instância ${req.params.instance}`);
-        const result = await sendMessage(number, message);
+        const result = await sendMessage(number, message, { idempotencyKey });
         
         res.json({
             success: true,
             messageId: result.messageId,
+            deduplicated: !!result.deduplicated,
             status: 'SENT'
         });
 
@@ -777,7 +784,7 @@ function formatOrderMessage(event, order, customer) {
             
         'order_ready': `🚗 *Pedido Pronto para Entrega!*\n\n` +
             `Olá, ${customerName}! O pedido *#${orderNumber}* já está pronto e aguardando a coleta do entregador.\n\n` +
-            `Obrigado por comprar com a Olika!`,
+            `Obrigado pela preferência!`,
             
         'order_completed': `🎉 *Pedido Entregue!*\n\n` +
             `Olá, ${customerName}! Confirmamos que o pedido *#${orderNumber}* foi entregue com sucesso.\n\n` +

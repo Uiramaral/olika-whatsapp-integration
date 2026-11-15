@@ -11,6 +11,7 @@ const fs = require("fs");
 const path = require("path");
 const axios = require('axios');
 const NodeCache = require("node-cache");
+const crypto = require("crypto");
 const logger = require('../config/logger');
 const { extractDataForAI } = require('../utils/ai_processor');
 const { getContentType } = require('@whiskeysockets/baileys');
@@ -31,7 +32,7 @@ const WH_API_TOKEN = process.env.WH_API_TOKEN || process.env.API_SECRET || proce
 const STATUS_CACHE_TTL = 30; // 🚨 NOVO: Cache de 30 segundos
 
 // 🎭 Contexto Estático (Persona da IA) — mantido apenas como referência legada
-const AI_SYSTEM_PROMPT = process.env.AI_SYSTEM_PROMPT || "Você é o atendente virtual da Olika.";
+const AI_SYSTEM_PROMPT = process.env.AI_SYSTEM_PROMPT || "Você é o atendente virtual do estabelecimento.";
 
 // 📋 Contexto Dinâmico (URL para buscar dados do cliente)
 const CUSTOMER_CONTEXT_URL = process.env.CUSTOMER_CONTEXT_URL;
@@ -41,6 +42,12 @@ const IA_RESPONDER_URL = process.env.IA_RESPONDER_URL
   || (WEBHOOK_URL ? WEBHOOK_URL.replace('/webhook', '/ia/responder') : null);
 
 const msgRetryCounterCache = new NodeCache();
+
+// 🔁 Cache de idempotência de envio: a mesma chave não deve gerar duas entregas.
+const idempotencyCache = new NodeCache({ stdTTL: 600, maxKeys: 2000 });
+
+// ⏱️ Contador de timeouts de ack: o primeiro é tolerado; o segundo força recuperação.
+const ackTimeoutCounter = new NodeCache({ stdTTL: 600 });
 
 // 📦 Store de mensagens para o getMessage (retry de entrega do WhatsApp).
 // Sem devolver a mensagem original, o WhatsApp não consegue retentar o envio e o
@@ -67,59 +74,18 @@ const previewTextoMensagem = (incomingMessage) => {
   if (msg.imageMessage) {
     return captionImagem ? `[Imagem recebida] ${captionImagem}` : '[Imagem recebida]';
   }
+  if (msg.audioMessage) {
+    return '[🎵 Mensagem de Áudio]';
+  }
+  if (msg.videoMessage) {
+    return '[🎬 Vídeo recebido]';
+  }
+  if (msg.documentMessage) {
+    return '[📄 Documento recebido]';
+  }
   return msg.conversation
     || msg.extendedTextMessage?.text
     || (msg.orderMessage ? '[🛒 Pedido do Catálogo WhatsApp]' : '[Mensagem sem texto]');
-};
-
-const adminNotifyCooldownCache = new NodeCache();
-// 📲 Notificação ao Administrador (celular que recebe alerta quando um cliente manda msg)
-const ADMIN_NOTIFY_PHONE = process.env.ADMIN_NOTIFY_PHONE || '5571981750546';
-const ADMIN_NOTIFY_COOLDOWN = parseInt(process.env.ADMIN_NOTIFY_COOLDOWN, 10) || 1800; // 30 minutos de silêncio por cliente
-
-// 💾 Cooldown persistido: sobrevive a reinícios do serviço (o cache em memória não sobrevive).
-const ADMIN_COOLDOWN_FILE = path.join(BASE_AUTH_DIR, 'admin_notify_cooldown.json');
-
-const lerCooldownsAdmin = () => {
-  try {
-    if (fs.existsSync(ADMIN_COOLDOWN_FILE)) {
-      return JSON.parse(fs.readFileSync(ADMIN_COOLDOWN_FILE, 'utf8')) || {};
-    }
-  } catch (e) {
-    logger.warn(`⚠️ [Alerta Admin] Falha ao ler cooldown persistido: ${e.message}`);
-  }
-  return {};
-};
-
-const gravarCooldownsAdmin = (mapa) => {
-  try {
-    fs.writeFileSync(ADMIN_COOLDOWN_FILE, JSON.stringify(mapa), 'utf8');
-  } catch (e) {
-    logger.warn(`⚠️ [Alerta Admin] Falha ao gravar cooldown persistido: ${e.message}`);
-  }
-};
-
-// Retorna true quando o contato ainda está em período de silêncio.
-const emCooldownAdmin = (chaveContato) => {
-  const agora = Date.now();
-  const mapa = lerCooldownsAdmin();
-  let alterou = false;
-
-  for (const [chave, expiraEm] of Object.entries(mapa)) {
-    if (!expiraEm || expiraEm <= agora) {
-      delete mapa[chave];
-      alterou = true;
-    }
-  }
-  if (alterou) gravarCooldownsAdmin(mapa);
-
-  return Boolean(mapa[chaveContato] && mapa[chaveContato] > agora);
-};
-
-const registrarCooldownAdmin = (chaveContato) => {
-  const mapa = lerCooldownsAdmin();
-  mapa[chaveContato] = Date.now() + (ADMIN_NOTIFY_COOLDOWN * 1000);
-  gravarCooldownsAdmin(mapa);
 };
 
 let globalSock = null;
@@ -152,8 +118,8 @@ const SOFT_RESTART_COOLDOWN_SECONDS = parseInt(process.env.SOFT_RESTART_COOLDOWN
 const IA_MESSAGE_DELAY_MS = parseInt(process.env.IA_MESSAGE_DELAY_MS, 10) || 5000;
 const delayMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// ⏱️ Timeout (ms) do POST para o Laravel (turno da IA). Cobre as tentativas do provedor principal.
-const IA_RESPONSE_TIMEOUT_MS = parseInt(process.env.IA_RESPONSE_TIMEOUT_MS, 10) || 45000;
+// ⏱️ Timeout (ms) do POST para o Laravel (turno da IA). Cobre principal + fallback com ferramentas.
+const IA_RESPONSE_TIMEOUT_MS = parseInt(process.env.IA_RESPONSE_TIMEOUT_MS, 10) || 60000;
 
 const softRestartCooldown = new NodeCache();
 const pendingAcks = new Map(); // messageId -> { timeout, jid }
@@ -173,8 +139,20 @@ const registerPendingSend = (key) => {
   clearPendingSend(key.id);
   const timeout = setTimeout(() => {
     pendingAcks.delete(key.id);
-    logger.warn(`⏱️ [Envio] Sem confirmação (ack) para ${key.remoteJid} id=${key.id}. Disparando recuperação automática.`);
-    softRestart('send-ack-timeout');
+    const timeouts = (ackTimeoutCounter.get('ack_timeout_count') || 0) + 1;
+    ackTimeoutCounter.set('ack_timeout_count', timeouts);
+    logger.warn(`⏱️ [Envio] Sem confirmação (ack) para ${key.remoteJid} id=${key.id} (timeout ${timeouts}).`);
+
+    // O primeiro timeout é tolerado: reiniciar com o socket conectado pode
+    // reenviar a mesma mensagem e duplicá-la no WhatsApp. A recuperação só
+    // ocorre se a sessão estiver desconectada ou se houver um segundo timeout.
+    if (!isSocketConnected || timeouts >= 2) {
+      ackTimeoutCounter.del('ack_timeout_count');
+      logger.warn('♻️ [Envio] Disparando recuperação após timeout de ack.');
+      softRestart('send-ack-timeout');
+    } else {
+      logger.warn('⏱️ [Envio] Primeiro timeout com socket conectado; aguardando confirmação antes de reiniciar.');
+    }
   }, SEND_ACK_TIMEOUT_MS);
   pendingAcks.set(key.id, { timeout, jid: key.remoteJid });
 };
@@ -203,6 +181,7 @@ const softRestart = async (reason = 'manual') => {
 
   pendingAcks.forEach((entry) => clearTimeout(entry.timeout));
   pendingAcks.clear();
+  ackTimeoutCounter.del('ack_timeout_count');
   if (globalSock) { try { globalSock.end(); } catch { } }
   globalSock = null;
   isSocketConnected = false;
@@ -723,49 +702,6 @@ const startSock = async (phoneOverride = null) => {
     const senderPhone = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
     logger.info(`📞 [FILTRO 3] Mensagem válida de: ${senderPhone} (JID: ${senderJid})`);
 
-    // 📲 ALERTA AO ADMINISTRADOR (71981750546) COM JANELA DE SILÊNCIO (COOLDOWN)
-    const adminPhoneClean = ADMIN_NOTIFY_PHONE.replace(/\D/g, '');
-    const cleanSenderPhone = senderPhone ? senderPhone.replace(/\D/g, '') : '';
-
-    // Evita loop se a mensagem for enviada pelo próprio administrador
-    if (adminPhoneClean && cleanSenderPhone && !cleanSenderPhone.endsWith(adminPhoneClean.slice(-8))) {
-      // Chave por contato normalizado: o mesmo cliente (número ou LID mapeado) conta como um só.
-      const cooldownKey = `admin_notif_${cleanSenderPhone}`;
-      const jaNotificado = emCooldownAdmin(cooldownKey) || adminNotifyCooldownCache.get(cooldownKey);
-
-      if (!jaNotificado) {
-        // Persiste o cooldown (sobrevive a reinício) e mantém o cache em memória como reforço
-        registrarCooldownAdmin(cooldownKey);
-        adminNotifyCooldownCache.set(cooldownKey, true, ADMIN_NOTIFY_COOLDOWN);
-
-        const pushName = incomingMessage.pushName || 'Cliente';
-        const msgRaw = incomingMessage.message?.conversation ||
-                       incomingMessage.message?.extendedTextMessage?.text ||
-                       (incomingMessage.message?.orderMessage ? '[🛒 Pedido do Catálogo WhatsApp]' :
-                        incomingMessage.message?.imageMessage ? '[📷 Foto/Imagem]' :
-                        incomingMessage.message?.audioMessage ? '[🎵 Mensagem de Áudio]' :
-                        incomingMessage.message?.documentMessage ? '[📄 Documento]' :
-                        '[Mídia/Arquivo]');
-
-        const msgResumo = msgRaw.length > 160 ? msgRaw.substring(0, 157) + '...' : msgRaw;
-        const cooldownMin = Math.round(ADMIN_NOTIFY_COOLDOWN / 60);
-
-        const alertaAdmin = `🔔 *Nova mensagem no WhatsApp da Olika*\n\n` +
-                            `👤 *Cliente:* ${pushName}${senderIsAlternativeId ? ' (ID alternativo)' : ` (${cleanSenderPhone})`}\n` +
-                            `💬 *Mensagem:* "${msgResumo}"\n\n` +
-                            `_Próximos avisos deste número silenciados por ${cooldownMin} min._`;
-
-        logger.info(`📲 [Alerta Admin] Notificando ${adminPhoneClean} sobre primeira mensagem de ${cleanSenderPhone}...`);
-
-        // Disparo assíncrono (sem bloquear o processamento da IA ou webhooks)
-        sendMessage(adminPhoneClean, alertaAdmin)
-          .then(() => logger.info(`✅ [Alerta Admin] Alerta entregue com sucesso para o administrador (${adminPhoneClean})!`))
-          .catch((err) => logger.warn(`⚠️ [Alerta Admin] Falha ao enviar alerta para ${adminPhoneClean}: ${err.message}`));
-      } else {
-        logger.info(`⏳ [Alerta Admin] Mensagem de ${cleanSenderPhone} em período de silêncio (cooldown de ${Math.round(ADMIN_NOTIFY_COOLDOWN / 60)} min ativo).`);
-      }
-    }
-
     // Encaminhamento paralelo (n8n) removido: o fluxo é exclusivamente o oficial (Laravel).
 
     // 🚨 NOVO: Atualização automática de nome se o pushName for válido e o banco tiver "Cliente"
@@ -905,50 +841,24 @@ const startSock = async (phoneOverride = null) => {
       const { payload, type, image, imageError } = await extractDataForAI(incomingMessage);
       const temImagem = !!(image && image.base64);
 
-      // Se não houver texto nem imagem, não envia para a IA.
-      if ((!payload || !payload.trim()) && !temImagem) {
+      // Se não houver texto, imagem extraída nem erro de imagem a notificar, não envia para a IA.
+      if ((!payload || !payload.trim()) && !temImagem && !(type === 'imagem' && imageError)) {
         logger.info(`⏭️ [IA] Mensagem de ${senderJid} sem conteúdo processável (tipo: ${type}${imageError ? `, imagem: ${imageError}` : ''}). Ignorando.`);
         return;
       }
 
-      // 🎵 ÁUDIO: a IA não ouve. Notifica o admin (ignorando cooldown) e avisa o cliente.
+      // 🎵 ÁUDIO: a IA não ouve. Orienta o cliente a enviar texto ou solicitar atendente.
       if (type === 'audio') {
-        const isAdmin = adminPhoneClean && senderPhone && senderPhone.endsWith(adminPhoneClean.slice(-8));
-
         try {
-          await sendMessage(senderJid, 'Sou um atendente virtual com inteligência artificial e ainda não consigo ouvir áudios. Já avisei uma pessoa da equipe da Olika, que vai te responder por aqui. Se puder, escreva sua mensagem em texto. 🙏');
+          await sendMessage(senderJid, 'Sou um atendente virtual com inteligência artificial e ainda não consigo ouvir áudios. Se puder, escreva sua mensagem em texto ou peça para falar com nossa equipe. 🙏');
         } catch (e) {
           logger.error(`❌ [Áudio] Falha ao avisar o cliente: ${e.message}`);
-        }
-
-        if (!isAdmin && adminPhoneClean) {
-          const alertaAudio = `🔔 *Áudio recebido no WhatsApp da Olika*\n\n` +
-            `👤 *Cliente:* ${incomingMessage.pushName || 'Cliente'} (${senderPhone})\n` +
-            `🎵 _Mensagem de áudio — a IA não transcreve. Atenda manualmente._`;
-          sendMessage(adminPhoneClean, alertaAudio)
-            .then(() => logger.info('✅ [Áudio] Administrador notificado (ignorando cooldown).'))
-            .catch((err) => logger.warn(`⚠️ [Áudio] Falha ao notificar admin: ${err.message}`));
         }
 
         return; // não chama a IA
       }
 
-      // 🎬 VÍDEO/DOCUMENTO não processável: notifica o admin (ignorando cooldown) e segue em texto.
-      const isAdminMidia = adminPhoneClean && senderPhone && senderPhone.endsWith(adminPhoneClean.slice(-8));
-      if (type === 'video' || type === 'documento') {
-        if (!isAdminMidia && adminPhoneClean) {
-          const rotulo = type === 'video' ? 'Vídeo' : 'Documento';
-          const alertaMidia = `🔔 *${rotulo} recebido no WhatsApp da Olika*\n\n` +
-            `👤 *Cliente:* ${incomingMessage.pushName || 'Cliente'} (${senderPhone})\n` +
-            `📎 _A IA não lê este tipo de mídia. Atenda manualmente se necessário._`;
-          sendMessage(adminPhoneClean, alertaMidia)
-            .then(() => logger.info('✅ [Mídia] Administrador notificado (ignorando cooldown).'))
-            .catch((err) => logger.warn(`⚠️ [Mídia] Falha ao notificar admin: ${err.message}`));
-        }
-        // não retorna: a IA ainda responde com o texto/caption disponível
-      }
-
-      // 🤖 Texto/PDF/imagem: quem responde é o Laravel (DeepSeek/Gemini)
+      // 🤖 Texto/PDF/imagem/vídeo/documento: quem orquestra e notifica o painel/admin é o Laravel
       const phoneNumber = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
       const responderUrl = IA_RESPONDER_URL;
 
@@ -957,13 +867,17 @@ const startSock = async (phoneOverride = null) => {
       }
 
       const iaPayload = {
-        mensagem: payload || '',
+        mensagem: payload || (type === 'imagem' ? '[Imagem recebida]' : ''),
         telefone: phoneNumber,
-        message_id: incomingMessage.key.id
+        message_id: incomingMessage.key.id,
+        message_type: messageTypePreview
       };
       if (temImagem) {
         iaPayload.imagem_base64 = image.base64;
         iaPayload.imagem_mime = image.mime;
+      }
+      if (imageError) {
+        iaPayload.imagem_erro = imageError;
       }
 
       // Nunca loga o base64: apenas o tipo e o resultado da extração.
@@ -984,24 +898,6 @@ const startSock = async (phoneOverride = null) => {
       if (iaResponse.data.allowlist === false) {
         logger.info(`🚫 [IA] Sem resposta para ${senderJid} (allowlist).`);
         return;
-      }
-
-      // Imagem não processada (toggle desligado, modelo sem visão, mídia inválida ou erro do provedor):
-      // mantém o alerta manual ao administrativo, sem o ruído de toda foto processada.
-      if (
-        type === 'imagem' &&
-        iaResponse.data?.imagem_processada !== true &&
-        iaResponse.data?.bloqueado_humano !== true &&
-        iaResponse.data?.duplicada !== true &&
-        !isAdminMidia &&
-        adminPhoneClean
-      ) {
-        const alertaImagem = `🔔 *Imagem recebida no WhatsApp da Olika*\n\n` +
-          `👤 *Cliente:* ${incomingMessage.pushName || 'Cliente'} (${senderPhone})\n` +
-          `📎 _A IA não conseguiu ler esta imagem. Atenda manualmente se necessário._`;
-        sendMessage(adminPhoneClean, alertaImagem)
-          .then(() => logger.info('✅ [Mídia] Administrador notificado (imagem não processada).'))
-          .catch((err) => logger.warn(`⚠️ [Mídia] Falha ao notificar admin: ${err.message}`));
       }
 
       // Só considera "sem resposta" quando não há texto NEM extras (ex.: resposta com só o PIX).
@@ -1033,20 +929,8 @@ const startSock = async (phoneOverride = null) => {
     } catch (error) {
       logger.error(`❌ ERRO NO FLUXO DE ORQUESTRAÇÃO: ${error.message}`);
 
-      const eraImagem = !!incomingMessage.message?.imageMessage;
-      const adminCleanFalha = String(ADMIN_NOTIFY_PHONE || '').replace(/\D/g, '');
-      const senderCleanFalha = String(senderPhone || '').replace(/\D/g, '');
-      if (eraImagem && adminCleanFalha && senderCleanFalha && !senderCleanFalha.endsWith(adminCleanFalha.slice(-8))) {
-        const alertaFalha = `🔔 *Imagem recebida no WhatsApp da Olika*\n\n` +
-          `👤 *Cliente:* ${incomingMessage.pushName || 'Cliente'} (${senderPhone})\n` +
-          `📎 _A IA não conseguiu processar esta imagem (falha técnica). Atenda manualmente se necessário._`;
-        sendMessage(adminCleanFalha, alertaFalha)
-          .then(() => logger.info('✅ [Mídia] Administrador notificado (falha ao processar imagem).'))
-          .catch((err) => logger.warn(`⚠️ [Mídia] Falha ao notificar admin: ${err.message}`));
-      }
-
       try {
-        await sendMessage(senderJid, "Desculpe, não consegui responder agora. Já avisei a equipe da Olika e logo te retornamos. 🙏");
+        await sendMessage(senderJid, "Desculpe, não consegui processar sua mensagem agora. Por favor, tente novamente em instantes ou aguarde um retorno da nossa equipe. 🙏");
       } catch (sendError) {
         logger.error(`❌ Erro ao enviar mensagem de erro: ${sendError.message}`);
       }
@@ -1059,6 +943,7 @@ const startSock = async (phoneOverride = null) => {
     for (const { key } of updates) {
       if (key?.id && pendingAcks.has(key.id)) {
         clearPendingSend(key.id);
+        ackTimeoutCounter.del('ack_timeout_count');
         logger.info(`✅ [Envio] Confirmação recebida para id=${key.id}`);
       }
     }
@@ -1197,7 +1082,7 @@ const variacoesNumeroWhatsApp = (cleanPhone) => {
   return variacoes;
 };
 
-const sendMessage = async (phone, message) => {
+const sendMessage = async (phone, message, options = {}) => {
   if (!globalSock || !isSocketConnected) throw new Error("Offline");
 
   try {
@@ -1208,6 +1093,23 @@ const sendMessage = async (phone, message) => {
       logger.warn(`⚠️ [sendMessage] Destinatário inválido ou sentinela ignorado: ${phone}`);
       throw new Error("Número inválido ou sentinela no WhatsApp");
     }
+
+    const idempotencyKey = options?.idempotencyKey ? String(options.idempotencyKey).trim() : "";
+    const cacheKey = idempotencyKey || null;
+
+    if (cacheKey) {
+      const cached = idempotencyCache.get(cacheKey);
+      if (cached) {
+        logger.info(`♻️ [Idempotência] Envio deduplicado para ${cleanPhone} (chave ${cacheKey})`);
+        return { success: true, messageId: cached.messageId, deduplicated: true };
+      }
+    }
+
+    // ID determinístico: o mesmo idempotencyKey reutiliza o mesmo messageId,
+    // inclusive após reinício do gateway ou retry interno do Baileys.
+    const stableMessageId = cacheKey
+      ? 'OLK' + crypto.createHash('sha1').update('olika:' + cacheKey).digest('hex').slice(0, 17).toUpperCase()
+      : undefined;
 
     let destinoJid = null;
     for (const variacao of variacoesNumeroWhatsApp(cleanPhone)) {
@@ -1220,13 +1122,18 @@ const sendMessage = async (phone, message) => {
 
     if (!destinoJid) throw new Error("Número inválido no WhatsApp");
 
-    const sent = await globalSock.sendMessage(destinoJid, { text: message });
+    const sendOptions = stableMessageId ? { messageId: stableMessageId } : {};
+    const sent = await globalSock.sendMessage(destinoJid, { text: message }, sendOptions);
+
+    if (cacheKey) {
+      idempotencyCache.set(cacheKey, { messageId: sent?.key?.id, em: Date.now() });
+    }
 
     // 📦 Guarda para retry (getMessage) e monitora confirmação de entrega
     storeMessage(sent?.key, sent?.message);
     registerPendingSend(sent?.key);
 
-    return { success: true, messageId: sent.key.id };
+    return { success: true, messageId: sent.key.id, deduplicated: false };
   } catch (e) {
     // Loga o erro, mas permite que o fluxo externo continue sem quebrar o listener
     logger.error(`❌ ERRO ao enviar mensagem para ${phone}: ${e.message}`);
