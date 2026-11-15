@@ -14,7 +14,7 @@ const NodeCache = require("node-cache");
 const crypto = require("crypto");
 const logger = require('../config/logger');
 const { extractDataForAI } = require('../utils/ai_processor');
-const { getContentType } = require('@whiskeysockets/baileys');
+const { getContentType, extractMessageContent } = require('@whiskeysockets/baileys');
 
 // Configurações
 const BASE_AUTH_DIR = path.resolve(__dirname, "..", "..", "auth_info_baileys");
@@ -46,6 +46,9 @@ const msgRetryCounterCache = new NodeCache();
 // 🔁 Cache de idempotência de envio: a mesma chave não deve gerar duas entregas.
 const idempotencyCache = new NodeCache({ stdTTL: 600, maxKeys: 2000 });
 
+// 🛡️ Cache de mensagens enviadas programaticamente pelo gateway (distinção de ecos fromMe).
+const systemSentCache = new NodeCache({ stdTTL: 600, maxKeys: 5000 });
+
 // ⏱️ Contador de timeouts de ack: o primeiro é tolerado; o segundo força recuperação.
 const ackTimeoutCounter = new NodeCache({ stdTTL: 600 });
 
@@ -67,24 +70,91 @@ const getStoredMessage = (key) => {
   return storeKey ? messageStore.get(storeKey) : undefined;
 };
 
+const ehMensagemDoSistema = (messageId) => {
+  if (!messageId) return false;
+  const idStr = String(messageId);
+  return Boolean(systemSentCache.get(idStr) || /^OLK[A-F0-9]{17,}$/i.test(idStr));
+};
+
+const ehJidIndividualValido = (jid) => {
+  if (!jid || typeof jid !== 'string') return false;
+  if (jid === 'status@broadcast') return false;
+  if (jid.endsWith('@broadcast') || jid.endsWith('@newsletter') || jid.endsWith('@g.us')) return false;
+  return true;
+};
+
+const desempacotarConteudoMensagem = (rawMessage) => {
+  if (!rawMessage || typeof rawMessage !== 'object') return rawMessage;
+
+  let atual = typeof extractMessageContent === 'function'
+    ? (extractMessageContent(rawMessage) || rawMessage)
+    : rawMessage;
+
+  for (let i = 0; i < 6 && atual && typeof atual === 'object'; i += 1) {
+    if (atual.deviceSentMessage?.message) {
+      atual = atual.deviceSentMessage.message;
+    } else if (atual.ephemeralMessage?.message) {
+      atual = atual.ephemeralMessage.message;
+    } else if (atual.viewOnceMessage?.message) {
+      atual = atual.viewOnceMessage.message;
+    } else if (atual.viewOnceMessageV2?.message) {
+      atual = atual.viewOnceMessageV2.message;
+    } else if (atual.viewOnceMessageV2Extension?.message) {
+      atual = atual.viewOnceMessageV2Extension.message;
+    } else if (atual.documentWithCaptionMessage?.message) {
+      atual = atual.documentWithCaptionMessage.message;
+    } else {
+      break;
+    }
+
+    if (typeof extractMessageContent === 'function') {
+      atual = extractMessageContent(atual) || atual;
+    }
+  }
+
+  return atual;
+};
+
 // Prévia textual para webhook/histórico. Nunca inclui base64 nem binário.
-const previewTextoMensagem = (incomingMessage) => {
-  const msg = incomingMessage?.message || {};
+const previewTextoMensagem = (incomingMessage, isFromMe = false) => {
+  const raw = incomingMessage?.message ?? incomingMessage ?? {};
+  const msg = desempacotarConteudoMensagem(raw) || raw || {};
+  const acaoMasc = isFromMe ? 'enviado' : 'recebido';
+  const acaoFem = isFromMe ? 'enviada' : 'recebida';
+
   const captionImagem = String(msg.imageMessage?.caption || '').trim();
   if (msg.imageMessage) {
-    return captionImagem ? `[Imagem recebida] ${captionImagem}` : '[Imagem recebida]';
+    return captionImagem ? `[Imagem ${acaoFem}] ${captionImagem}` : `[Imagem ${acaoFem}]`;
   }
   if (msg.audioMessage) {
-    return '[🎵 Mensagem de Áudio]';
+    return isFromMe ? '[🎵 Áudio enviado]' : '[🎵 Mensagem de Áudio]';
   }
   if (msg.videoMessage) {
-    return '[🎬 Vídeo recebido]';
+    const captionVideo = String(msg.videoMessage.caption || '').trim();
+    return captionVideo ? `[🎬 Vídeo ${acaoMasc}] ${captionVideo}` : `[🎬 Vídeo ${acaoMasc}]`;
   }
   if (msg.documentMessage) {
-    return '[📄 Documento recebido]';
+    const nomeDoc = String(msg.documentMessage.fileName || '').trim();
+    const captionDoc = String(msg.documentMessage.caption || '').trim();
+    const baseDoc = nomeDoc ? `[📄 Documento ${acaoMasc}: ${nomeDoc}]` : `[📄 Documento ${acaoMasc}]`;
+    return captionDoc ? `${baseDoc} ${captionDoc}` : baseDoc;
+  }
+  if (msg.stickerMessage) {
+    return isFromMe ? '[Figurinha enviada]' : '[Figurinha recebida]';
+  }
+  if (msg.locationMessage || msg.liveLocationMessage) {
+    const loc = msg.locationMessage || msg.liveLocationMessage;
+    const descLoc = String(loc?.name || loc?.address || '').trim();
+    return descLoc ? `[📍 Localização ${acaoFem}] ${descLoc}` : `[📍 Localização ${acaoFem}]`;
+  }
+  if (msg.contactMessage || msg.contactsArrayMessage) {
+    const nomeContato = String(msg.contactMessage?.displayName || msg.contactsArrayMessage?.displayName || '').trim();
+    return nomeContato ? `[👤 Contato ${acaoMasc}: ${nomeContato}]` : `[👤 Contato ${acaoMasc}]`;
   }
   return msg.conversation
     || msg.extendedTextMessage?.text
+    || msg.editedMessage?.message?.conversation
+    || msg.editedMessage?.message?.extendedTextMessage?.text
     || (msg.orderMessage ? '[🛒 Pedido do Catálogo WhatsApp]' : '[Mensagem sem texto]');
 };
 
@@ -373,6 +443,173 @@ const checkAiStatus = async (senderJid) => {
   }
 };
 
+const invalidarCacheStatusIa = (...jids) => {
+  const chaves = new Set();
+  jids.filter(Boolean).forEach((jid) => {
+    const str = String(jid);
+    chaves.add(`ai_status_${str}`);
+    const digits = str.replace(/@.*$/, '').replace(/\D/g, '');
+    if (digits) {
+      chaves.add(`ai_status_${digits}@s.whatsapp.net`);
+      variacoesNumeroWhatsApp(digits).forEach((v) => {
+        chaves.add(`ai_status_${v}@s.whatsapp.net`);
+      });
+    }
+  });
+  chaves.forEach((chave) => msgRetryCounterCache.del(chave));
+};
+
+const resolverContatoDoEvento = async (key) => {
+  const senderJidRaw = key?.remoteJid;
+  if (!ehJidIndividualValido(senderJidRaw)) {
+    return null;
+  }
+
+  let senderJid = senderJidRaw;
+  let senderIsAlternativeId = false;
+
+  if (senderJidRaw.endsWith('@lid')) {
+    const resolvedJid = (await resolveLidToPn(senderJidRaw)) || pnJidFromKey(key);
+    if (resolvedJid) {
+      logger.info(`🗺️ [LID] Resolvido ${senderJidRaw} → ${resolvedJid}`);
+      senderJid = resolvedJid;
+
+      const lidPuro = senderJidRaw.split('@')[0];
+      const cleanPhonePuro = resolvedJid.split('@')[0];
+      const syncLidUrl = WEBHOOK_URL.replace('/webhook', '/sync-lid');
+
+      logger.info(`🗺️ [LID Sync Express] Sincronizando vínculo: LID ${lidPuro} <-> Telefone ${cleanPhonePuro}`);
+      axios.post(syncLidUrl, {
+        client_id: CLIENT_ID,
+        lid: lidPuro,
+        phone: cleanPhonePuro,
+        token: WH_API_TOKEN
+      }, {
+        headers: {
+          'X-API-Token': WH_API_TOKEN
+        }
+      }).catch((e) => logger.error(`❌ [LID Sync Express] Erro ao sincronizar LID: ${e.message}`));
+    } else {
+      logger.warn(`⚠️ [LID] Não mapeado: ${senderJidRaw}.`);
+      senderIsAlternativeId = true;
+      senderJid = senderJidRaw;
+    }
+  }
+
+  if (!ehJidIndividualValido(senderJid)) {
+    return null;
+  }
+
+  const phone = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
+  return {
+    rawJid: senderJidRaw,
+    jid: senderJid,
+    phone,
+    isAlternativeId: senderIsAlternativeId,
+  };
+};
+
+const FROM_ME_STUB_TYPES = new Set([
+  'protocolMessage',
+  'senderKeyDistributionMessage',
+  'fastRatchetKeySenderKeyDistributionMessage',
+  'messageContextInfo',
+  'deviceListMetadata',
+  'keyExchangeMessage',
+  'reactionMessage',
+  'pollUpdateMessage',
+  'pinInChatMessage',
+  'keepInChatMessage',
+  'bcallMessage',
+]);
+
+const tratarMensagemHumanaExterna = async (incomingMessage, upsertType) => {
+  const messageId = incomingMessage?.key?.id || null;
+  const senderJidRaw = incomingMessage?.key?.remoteJid;
+
+  if (upsertType && upsertType !== 'notify') {
+    logger.info(`⏭️ [fromMe] Evento histórico ignorado (type=${upsertType}, id=${messageId}).`);
+    return;
+  }
+
+  if (!incomingMessage?.message) {
+    return;
+  }
+
+  if (ehMensagemDoSistema(messageId)) {
+    logger.info(`⏭️ [fromMe] Eco programático do sistema ignorado (${messageId}).`);
+    return;
+  }
+
+  if (!ehJidIndividualValido(senderJidRaw)) {
+    logger.info(`⏭️ [fromMe] Conversa não individual ignorada (${senderJidRaw}).`);
+    return;
+  }
+
+  const conteudoDesempacotado = desempacotarConteudoMensagem(incomingMessage.message);
+  if (!conteudoDesempacotado || typeof conteudoDesempacotado !== 'object') {
+    return;
+  }
+
+  const messageType = getContentType(conteudoDesempacotado) || '';
+  if (
+    FROM_ME_STUB_TYPES.has(messageType) ||
+    conteudoDesempacotado.reactionMessage ||
+    conteudoDesempacotado.protocolMessage ||
+    conteudoDesempacotado.senderKeyDistributionMessage ||
+    conteudoDesempacotado.pollUpdateMessage ||
+    conteudoDesempacotado.pinInChatMessage
+  ) {
+    logger.info(`⏭️ [fromMe] Evento técnico/reação ignorado (${messageType}) para ${senderJidRaw}.`);
+    return;
+  }
+
+  const textoResumo = previewTextoMensagem({ message: conteudoDesempacotado }, true);
+  if (!textoResumo || textoResumo === '[Mensagem sem texto]' || !String(textoResumo).trim()) {
+    logger.info(`⏭️ [fromMe] Mensagem sem conteúdo textual/mídia válida ignorada (${messageType}) para ${senderJidRaw}.`);
+    return;
+  }
+
+  const contato = await resolverContatoDoEvento(incomingMessage.key);
+  if (!contato || !contato.phone) {
+    logger.info(`⏭️ [fromMe] Destinatário inválido ou não individual após resolução (${senderJidRaw}).`);
+    return;
+  }
+
+  invalidarCacheStatusIa(contato.rawJid, contato.jid);
+
+  const webhookFromMePayload = {
+    client_id: CLIENT_ID,
+    phone: contato.jid,
+    is_lid: contato.jid.endsWith('@lid'),
+    is_alternative_id: contato.isAlternativeId,
+    instance_phone: currentPhone,
+    message: textoResumo,
+    from_me: true,
+    origem: 'humano',
+    message_type: messageType || 'unknown',
+    push_name: null,
+    message_id: messageId,
+    token: WH_API_TOKEN
+  };
+
+  logger.info(`📡 [WEBHOOK fromMe] Encaminhando resposta humana externa ao Laravel`, {
+    phone: webhookFromMePayload.phone,
+    messageType: webhookFromMePayload.message_type,
+    messageId
+  });
+
+  axios.post(WEBHOOK_URL, webhookFromMePayload, {
+    headers: {
+      'X-API-Token': WH_API_TOKEN,
+      'Content-Type': 'application/json'
+    },
+    timeout: 5000
+  })
+    .then(() => logger.info(`✅ [WEBHOOK fromMe] Registrado no Laravel (${messageId})`))
+    .catch((e) => logger.error(`❌ [WEBHOOK fromMe] Erro ao enviar ao Laravel: ${e.message}`));
+};
+
 // --- Função Core: Start do Socket ---
 const startSock = async (phoneOverride = null) => {
   const phoneToUse = phoneOverride || loadConfig(); // Sem fallback para .env
@@ -595,112 +832,83 @@ const startSock = async (phoneOverride = null) => {
     }
   });
 
-  // Eventos Mantidos - Orquestração Completa de IA
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const incomingMessage = messages[0];
+  // Eventos Mantidos - Orquestração Completa de IA e detecção de envio humano externo
+  sock.ev.on("messages.upsert", async ({ messages, type: upsertType }) => {
+    for (const incomingMessage of (messages || [])) {
+      await (async () => {
+        if (!incomingMessage?.key) {
+          return;
+        }
 
-    // 🔍 LOG DE DEBUG - SEMPRE LOGAR PRIMEIRO (antes de qualquer filtro)
-    const senderJidRaw = incomingMessage.key.remoteJid;
-    const fromMeRaw = incomingMessage.key.fromMe;
-    const messageId = incomingMessage.key.id;
-    
-    logger.info(`📩 [DEBUG INICIAL] Mensagem upsert recebida`, {
-      fromMe: fromMeRaw,
-      remoteJid: senderJidRaw,
-      hasMessage: !!incomingMessage.message,
-      messageType: incomingMessage.message ? Object.keys(incomingMessage.message)[0] : 'none',
-      timestamp: new Date().toISOString()
-    });
+        // 🔍 LOG DE DEBUG - SEMPRE LOGAR PRIMEIRO (antes de qualquer filtro)
+        const senderJidRaw = incomingMessage.key.remoteJid;
+        const fromMeRaw = incomingMessage.key.fromMe;
+        const messageId = incomingMessage.key.id;
 
-    // 📦 Guarda no store para o getMessage (retry/descriptografia)
-    storeMessage(incomingMessage.key, incomingMessage.message);
+        logger.info(`📩 [DEBUG INICIAL] Mensagem upsert recebida`, {
+          fromMe: fromMeRaw,
+          upsertType: upsertType || 'unknown',
+          remoteJid: senderJidRaw,
+          hasMessage: !!incomingMessage.message,
+          messageType: incomingMessage.message ? Object.keys(incomingMessage.message)[0] : 'none',
+          timestamp: new Date().toISOString()
+        });
 
-    // Filtro essencial para não processar status ou mensagens próprias
-    if (fromMeRaw || !incomingMessage.message) {
-      logger.info(`⏭️ [FILTRO 1] Ignorada: fromMe=${fromMeRaw}, hasMessage=${!!incomingMessage.message}`);
-      return;
-    }
+        // 📦 Guarda no store para o getMessage (retry/descriptografia)
+        storeMessage(incomingMessage.key, incomingMessage.message);
 
-    // 🚫 Filtro de Mensagens Técnicas / Protocolo / Reações do WhatsApp:
-    // Ignora eventos que não representam mensagens reais enviadas por um ser humano:
-    // protocolMessage (exclusão, sincronização, chaves), senderKeyDistributionMessage (chaves E2EE),
-    // reactionMessage (reação com emoji), deviceSentMessage, etc.
-    const rawMessageType = getContentType(incomingMessage.message) || '';
-    const internalProtocolTypes = [
-      'protocolMessage',
-      'senderKeyDistributionMessage',
-      'fastRatchetKeySenderKeyDistributionMessage',
-      'messageContextInfo',
-      'deviceSentMessage',
-      'deviceListMetadata',
-      'keyExchangeMessage',
-      'reactionMessage',
-      'pollUpdateMessage',
-      'keepInChatMessage',
-      'bcallMessage'
-    ];
+        if (fromMeRaw) {
+          await tratarMensagemHumanaExterna(incomingMessage, upsertType);
+          return;
+        }
 
-    if (
-      internalProtocolTypes.includes(rawMessageType) ||
-      incomingMessage.message?.reactionMessage ||
-      incomingMessage.message?.protocolMessage ||
-      incomingMessage.message?.senderKeyDistributionMessage ||
-      incomingMessage.message?.deviceSentMessage
-    ) {
-      logger.info(`⏭️ [FILTRO PROTOCOLO] Mensagem técnica/interna do WhatsApp (${rawMessageType}) de ${senderJidRaw}. Ignorando silenciosamente.`);
-      return;
-    }
+        // Filtro essencial para ignorar eventos recebidos sem corpo
+        if (!incomingMessage.message) {
+          logger.info(`⏭️ [FILTRO 1] Ignorada: fromMe=${fromMeRaw}, hasMessage=${!!incomingMessage.message}`);
+          return;
+        }
 
-    // 🗺️ RESOLUÇÃO DE LID: O WhatsApp usa LIDs no protocolo multi-device
-    // Mensagens de números externos chegam com @lid em vez de @s.whatsapp.net
-    // Tentamos resolver via mapa; se não encontrado, processamos assim mesmo com log
-    let senderJid = senderJidRaw;
-    let senderIsAlternativeId = false;
-    if (senderJidRaw && senderJidRaw.endsWith('@lid')) {
-      const resolvedJid = (await resolveLidToPn(senderJidRaw)) || pnJidFromKey(incomingMessage.key);
-      if (resolvedJid) {
-        logger.info(`🗺️ [LID] Resolvido ${senderJidRaw} → ${resolvedJid}`);
-        senderJid = resolvedJid;
-        // ✅ IMPORTANTE: Se já temos o JID resolvido, NÃO enviamos webhook com LID
-        // Isso evita duplicatas no banco (uma com LID, outra com JID)
-        
-        // 🚨 AJUSTE DE TOKEN DEDICADO NO SYNC-LID EXPRESS
-        const lidPuro = senderJidRaw.split('@')[0];
-        const cleanPhonePuro = resolvedJid.split('@')[0];
-        const syncLidUrl = WEBHOOK_URL.replace('/webhook', '/sync-lid');
-        
-        logger.info(`🗺️ [LID Sync Express] Sincronizando vínculo: LID ${lidPuro} <-> Telefone ${cleanPhonePuro}`);
-        axios.post(syncLidUrl, {
-          client_id: CLIENT_ID,
-          lid: lidPuro,
-          phone: cleanPhonePuro,
-          token: WH_API_TOKEN // ✅ Injeta no corpo
-        }, {
-          headers: {
-            'X-API-Token': WH_API_TOKEN // ✅ Injeta no Header
-          }
-        }).catch((e) => logger.error(`❌ [LID Sync Express] Erro ao sincronizar LID: ${e.message}`));
-      } else {
-        // LID não mapeado ainda — processa assim mesmo, usando o LID como identificador
-        // O número no banco será o LID até o contato ser mapeado
-        const pushName = incomingMessage.pushName || 'Desconhecido';
-        logger.warn(`⚠️ [LID] Não mapeado: ${senderJidRaw} (pushName=${pushName}). Processando com LID.`);
-        senderIsAlternativeId = true;
-        senderJid = senderJidRaw; // mantém o @lid
-      }
-    }
+        // 🚫 Filtro de Mensagens Técnicas / Protocolo / Reações do WhatsApp:
+        // Ignora eventos que não representam mensagens reais enviadas por um ser humano:
+        // protocolMessage (exclusão, sincronização, chaves), senderKeyDistributionMessage (chaves E2EE),
+        // reactionMessage (reação com emoji), deviceSentMessage, etc.
+        const rawMessageType = getContentType(incomingMessage.message) || '';
+        const internalProtocolTypes = [
+          'protocolMessage',
+          'senderKeyDistributionMessage',
+          'fastRatchetKeySenderKeyDistributionMessage',
+          'messageContextInfo',
+          'deviceSentMessage',
+          'deviceListMetadata',
+          'keyExchangeMessage',
+          'reactionMessage',
+          'pollUpdateMessage',
+          'keepInChatMessage',
+          'bcallMessage'
+        ];
 
-    // 🚨 FILTRO: Ignorar broadcasts, newsletters, grupos e status
-    // @lid NÃO é mais filtrado — é resolvido acima para o JID real
-    if (!senderJid) return;
-    if (senderJid.endsWith('@broadcast')) { logger.info(`⏭️ [FILTRO 2] Ignorado @broadcast: ${senderJid}`); return; }
-    if (senderJid.endsWith('@newsletter')) { logger.info(`⏭️ [FILTRO 2] Ignorado @newsletter: ${senderJid}`); return; }
-    if (senderJid.endsWith('@g.us')) { logger.info(`⏭️ [FILTRO 2] Ignorado @g.us (grupo): ${senderJid}`); return; }
-    if (senderJid === 'status@broadcast') { logger.info(`⏭️ [FILTRO 2] Ignorado status@broadcast`); return; }
+        if (
+          internalProtocolTypes.includes(rawMessageType) ||
+          incomingMessage.message?.reactionMessage ||
+          incomingMessage.message?.protocolMessage ||
+          incomingMessage.message?.senderKeyDistributionMessage ||
+          incomingMessage.message?.deviceSentMessage
+        ) {
+          logger.info(`⏭️ [FILTRO PROTOCOLO] Mensagem técnica/interna do WhatsApp (${rawMessageType}) de ${senderJidRaw}. Ignorando silenciosamente.`);
+          return;
+        }
 
-    // 🚨 LOG DO NÚMERO DO REMETENTE APÓS FILTROS
-    const senderPhone = senderJid.replace(/@.*$/, '').replace(/\D/g, '');
-    logger.info(`📞 [FILTRO 3] Mensagem válida de: ${senderPhone} (JID: ${senderJid})`);
+        // 🗺️ RESOLUÇÃO DE LID e descarte de grupos/broadcasts/newsletters/status
+        const contato = await resolverContatoDoEvento(incomingMessage.key);
+        if (!contato) {
+          logger.info(`⏭️ [FILTRO 2] Contato ignorado (grupo/status/newsletter/inválido): ${senderJidRaw}`);
+          return;
+        }
+
+        const senderJid = contato.jid;
+        const senderIsAlternativeId = contato.isAlternativeId;
+        const senderPhone = contato.phone;
+        logger.info(`📞 [FILTRO 3] Mensagem válida de: ${senderPhone} (JID: ${senderJid})`);
 
     // Encaminhamento paralelo (n8n) removido: o fluxo é exclusivamente o oficial (Laravel).
 
@@ -935,6 +1143,8 @@ const startSock = async (phoneOverride = null) => {
         logger.error(`❌ Erro ao enviar mensagem de erro: ${sendError.message}`);
       }
     }
+      })();
+    }
   });
   sock.ev.on("creds.update", saveCreds);
 
@@ -1105,11 +1315,13 @@ const sendMessage = async (phone, message, options = {}) => {
       }
     }
 
-    // ID determinístico: o mesmo idempotencyKey reutiliza o mesmo messageId,
-    // inclusive após reinício do gateway ou retry interno do Baileys.
+    // ID determinístico: o mesmo idempotencyKey reutiliza o mesmo messageId;
+    // quando ausente, usa prefixo exclusivo OLK para diferenciar ecos fromMe mesmo pós-restart.
     const stableMessageId = cacheKey
       ? 'OLK' + crypto.createHash('sha1').update('olika:' + cacheKey).digest('hex').slice(0, 17).toUpperCase()
       : undefined;
+    const outgoingId = stableMessageId
+      || ('OLK' + crypto.randomBytes(10).toString('hex').toUpperCase());
 
     let destinoJid = null;
     for (const variacao of variacoesNumeroWhatsApp(cleanPhone)) {
@@ -1122,11 +1334,16 @@ const sendMessage = async (phone, message, options = {}) => {
 
     if (!destinoJid) throw new Error("Número inválido no WhatsApp");
 
-    const sendOptions = stableMessageId ? { messageId: stableMessageId } : {};
+    systemSentCache.set(outgoingId, true);
+    const sendOptions = { messageId: outgoingId };
     const sent = await globalSock.sendMessage(destinoJid, { text: message }, sendOptions);
 
+    if (sent?.key?.id) {
+      systemSentCache.set(sent.key.id, true);
+    }
+
     if (cacheKey) {
-      idempotencyCache.set(cacheKey, { messageId: sent?.key?.id, em: Date.now() });
+      idempotencyCache.set(cacheKey, { messageId: sent?.key?.id || outgoingId, em: Date.now() });
     }
 
     // 📦 Guarda para retry (getMessage) e monitora confirmação de entrega
