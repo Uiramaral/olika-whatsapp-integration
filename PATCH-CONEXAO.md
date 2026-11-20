@@ -35,6 +35,13 @@ sessão corrompida. O gateway reconectava em 3s e o ciclo se repetia para sempre
 persistir `/app/auth_info_baileys` sozinho. Sem o volume, todo deploy ainda perde a
 sessão.
 
+O caminho de montagem ideal é **`/app/auth_info_baileys`** (a pasta pai). Se o
+volume for montado em `/app/auth_info_baileys/5571987019420` (a pasta da sessão),
+o `session_config.json` fica fora do volume e o container sobe em STANDBY. Para
+cobrir esse caso, `loadConfig()` agora procura a pasta mais recente com
+`creds.json` e recria o `session_config.json` no boot, reutilizando a sessão
+existente. Ainda assim, corrigir o mount para a pasta pai é o recomendado.
+
 ### 3. Robustez da reconexão
 
 - **Geração do socket:** eventos de um socket antigo são ignorados; um socket novo
@@ -45,6 +52,11 @@ sessão.
   `open`, o ciclo normal continua reconectando em ~3s.
 - **440 (connectionReplaced):** espera 90s em vez de entrar em ping-pong com outra
   instância.
+- **Conflito de sessão (`Stream Errored (conflict)`):** pode vir com code 401, mas
+  **não é logout**. O gateway preserva as credenciais, alerta o Laravel e tenta
+  de novo em 5 min. Se repetir, há outra instância usando a mesma sessão
+  (deploy antigo ou réplica); verifique no Railway. O comportamento antigo apagava
+  a pasta de sessão e forçava um novo pareamento.
 - **Watchdog:** a cada 60s verifica `globalSock.ws.isOpen`; se o WebSocket morreu
   sem emitir `close`, chama `softRestart('watchdog-ws')`.
 - **Versão do WhatsApp Web:** buscada uma vez por processo e com fallback para a

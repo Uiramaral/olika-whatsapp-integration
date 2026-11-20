@@ -494,9 +494,40 @@ const resolveLidToPn = async (lidJid) => {
 const loadConfig = () => {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
-      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')).phone;
+      const phone = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')).phone;
+      if (phone) return phone;
     }
-  } catch (e) { return null; }
+  } catch (e) {
+    logger.warn(`⚠️ [Auth] Falha ao ler session_config.json: ${e.message}`);
+  }
+
+  // Fallback: se o session_config.json não estiver no volume (ex.: volume
+  // montado na pasta da sessão, e não na pasta pai), procura a pasta mais
+  // recente com creds.json e recria o config. Evita STANDBY após deploy.
+  try {
+    const pastas = fs.readdirSync(BASE_AUTH_DIR, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => {
+        const creds = path.join(BASE_AUTH_DIR, d.name, 'creds.json');
+        try {
+          return fs.existsSync(creds) ? { phone: d.name, mtime: fs.statSync(creds).mtimeMs } : null;
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtime - a.mtime);
+
+    if (pastas.length > 0) {
+      const phone = pastas[0].phone;
+      saveConfig(phone);
+      logger.info(`🔐 [Auth] session_config.json ausente; reutilizando a sessão existente ${phone}.`);
+      return phone;
+    }
+  } catch (e) {
+    logger.warn(`⚠️ [Auth] Falha ao procurar sessão existente: ${e.message}`);
+  }
+
   return null;
 };
 
@@ -985,10 +1016,12 @@ const startSock = async (phoneOverride = null) => {
         || lastDisconnect?.error?.output?.payload?.message
         || null;
       const noDoErro = lastDisconnect?.error?.data || null;
+      const tagDoErro = noDoErro?.tag || null;
 
       lastDisconnectInfo = {
         code: reason ?? null,
         message: motivoReal,
+        tag: tagDoErro,
         ackId: noDoErro?.attrs?.id || null,
         at: new Date().toISOString(),
       };
@@ -998,6 +1031,21 @@ const startSock = async (phoneOverride = null) => {
       if (manualStop) {
         manualStop = false;
         logger.info('⏹️ [Conexão] Fechamento manual; reconexão automática desativada.');
+        return;
+      }
+
+      // "Stream Errored (conflict)" pode vir com code 401, mas NÃO é logout:
+      // significa que outra conexão está usando as mesmas credenciais. Apagar
+      // a sessão aqui destrói uma sessão válida e força um novo pareamento.
+      const ehConflito = /conflict/i.test(motivoReal || '') || tagDoErro === 'conflict';
+      if (ehConflito) {
+        logger.error('🚨 [Conexão] Conflito de sessão: outra conexão está usando as mesmas credenciais. Sessão preservada; não vou apagar as credenciais.');
+        axios.post(WEBHOOK_URL, {
+          type: 'shutdown_alert',
+          instance_phone: currentPhone,
+          reason: 'CONNECTION_CONFLICT'
+        }).catch(() => { });
+        scheduleReconnect(300000, 'conflito de sessão');
         return;
       }
 
@@ -1042,8 +1090,7 @@ const startSock = async (phoneOverride = null) => {
       }
 
       // LOGOUT MANUAL DETECTADO (401) OU LIMITE DE FALHAS CONSECUTIVAS EM PRODUÇÃO
-      if (reason === DisconnectReason.loggedOut || consecutiveFailures >= MAX_FAILURES) {
-        if (disconnectWebhookTimer) {
+      if (reason === DisconnectReason.loggedOut || consecutiveFailures >= MAX_FAILURES) {        if (disconnectWebhookTimer) {
           clearTimeout(disconnectWebhookTimer);
           disconnectWebhookTimer = null;
         }
