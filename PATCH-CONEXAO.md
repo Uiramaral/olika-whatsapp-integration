@@ -61,6 +61,44 @@ sessão.
 via `console.info`. `src/utils/log_filter.js` intercepta `process.stdout/stderr.write`
 e descarta esses blocos. O pino silencioso não cobre esse caminho.
 
+### 5. Mensagem presa (stream errored ack)
+
+O log de 20/11 mostrou um caso diferente do ACK geral: o servidor cobrava o ACK de
+**sempre o mesmo id** (`3A115F55…`) a cada ~50 min. Essa mensagem não aparece no
+`messages.upsert` — ou seja, o Baileys não conseguiu descriptografá-la, mandou
+retry/NACK e o servidor continuou com ela pendente. A correção do ACK de sucesso
+não alcança esse caminho.
+
+O gateway agora:
+
+- guarda o nó bruto de cada `CB:message` por 2h (até 5.000 mensagens);
+- escuta `CB:stream:error` **antes** do Baileys encerrar o socket e extrai o id
+  do ACK cobrado;
+- tenta liberar a mensagem imediatamente (se o nó estiver no cache) e, na próxima
+  reentrega, envia o ACK de sucesso para o mesmo id — o servidor para de cobrar;
+- registra no log o `from`/`type` da mensagem liberada.
+
+Logs esperados:
+
+```
+🧩 [Baileys] Patch de ACK: aplicado
+🩹 [ACK] Liberação de mensagem presa: ativa.
+🧩 [ACK] Servidor cobrando ACK da mensagem id=... type=text. Liberando...
+🩹 [ACK] Mensagem presa liberada id=... from=... type=text (...). Se for um cliente, peça para reenviar.
+```
+
+Flags:
+
+- `ACK_STUCK_MESSAGES=false` desliga a liberação automática (o padrão é ativa
+  quando o patch de ACK está aplicado).
+- `DEBUG_RAW_MESSAGES=true` loga `id`, `from`, `type` e `participant` de cada
+  mensagem bruta (útil para identificar a origem da mensagem presa).
+- Se o patch de ACK não estiver na imagem, a liberação fica desativada
+  automaticamente e o boot loga `Patch de ACK: AUSENTE`.
+
+Trade-off: a mensagem presa já está indescritografável e perdida; o ACK só
+destrava o servidor. O log traz o `from` para avisar o contato e pedir reenvio.
+
 ## Deploy
 
 1. **Crie o volume no Railway** montado em `/app/auth_info_baileys` (serviço do
@@ -81,8 +119,12 @@ e descarta esses blocos. O pino silencioso não cobre esse caminho.
 
 ## Validação
 
-- **ACK:** com o sistema ocioso, o ciclo de 500 a cada ~50 min deve desaparecer.
-  Antes eram 7 quedas em ~6h; depois do patch, o esperado é **zero 500**.
+- **ACK:** o ciclo de 500 a cada ~50 min causado por mensagens normais deve
+  desaparecer. Se aparecer um 500 isolado com **sempre o mesmo id**, é uma
+  mensagem presa (ver seção 5); o gateway a libera e o ciclo não deve se repetir.
+- **Mensagem presa:** no próximo ciclo, o log deve mostrar o id, o `from`/`type`
+  e a liberação. Se o mesmo id voltar depois de duas liberações, o ACK não está
+  sendo aceito; envie o log para análise.
 - **Motivo da queda:** em `GET /api/whatsapp/diagnostics`, `lastDisconnect.message`
   deve mostrar `Stream Errored (ack)` se o patch não estiver ativo. Se mostrar isso,
   confira no build se apareceu `[patch-baileys] ACK de mensagem restaurado`.

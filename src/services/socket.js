@@ -208,6 +208,35 @@ const delayMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // ⏱️ Timeout (ms) do POST para o Laravel (turno da IA). Cobre principal + fallback com ferramentas.
 const IA_RESPONSE_TIMEOUT_MS = parseInt(process.env.IA_RESPONSE_TIMEOUT_MS, 10) || 60000;
 
+// 🩹 Mensagem presa: o servidor cobra o ACK de uma mensagem que não conseguimos
+// descriptografar e derruba o stream a cada ~50 min. Guardamos o nó bruto e
+// liberamos a mensagem na próxima reentrega (ela já está perdida; o ACK só
+// destrava o servidor). Exige o patch de ACK aplicado na imagem.
+const patchAckAplicado = (() => {
+  try {
+    const dirBaileys = path.dirname(require.resolve('@whiskeysockets/baileys'));
+    const arquivoRecv = path.join(dirBaileys, 'Socket', 'messages-recv.js');
+    return fs.existsSync(arquivoRecv) && fs.readFileSync(arquivoRecv, 'utf8').includes('[OLIKA PATCH]');
+  } catch {
+    return false;
+  }
+})();
+
+const DEBUG_RAW_MESSAGES = process.env.DEBUG_RAW_MESSAGES === 'true';
+const ACK_STUCK_MESSAGES = patchAckAplicado
+  && !['false', '0', 'off'].includes(String(process.env.ACK_STUCK_MESSAGES || '').toLowerCase());
+const RAW_MESSAGE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
+const RAW_MESSAGE_CACHE_MAX = 5000;
+const STUCK_ID_TTL_MS = 6 * 60 * 60 * 1000;
+const rawMessageCache = new Map(); // id -> { node, at }
+const stuckMessageIds = new Map(); // id -> { at, motivo }
+
+logger.info(`🧩 [Baileys] Patch de ACK: ${patchAckAplicado ? 'aplicado' : 'AUSENTE'}`);
+if (!patchAckAplicado) {
+  logger.warn('⚠️ [Baileys] Patch de ACK ausente na imagem; a liberação automática de mensagem presa fica desativada.');
+}
+logger.info(`🩹 [ACK] Liberação de mensagem presa: ${ACK_STUCK_MESSAGES ? 'ativa' : 'desativada'}${DEBUG_RAW_MESSAGES ? ' | log bruto ativo' : ''}.`);
+
 const softRestartCooldown = new NodeCache();
 const pendingAcks = new Map(); // messageId -> { timeout, jid }
 
@@ -302,6 +331,94 @@ const getDiagnostics = () => ({
   lastDisconnect: lastDisconnectInfo,
   authDir: BASE_AUTH_DIR,
 });
+
+// Limpa os caches de diagnóstico (nós brutos e ids presos).
+const limparCachesDiagnostico = () => {
+  const agora = Date.now();
+  for (const [id, item] of rawMessageCache) {
+    if (agora - item.at > RAW_MESSAGE_CACHE_TTL_MS) rawMessageCache.delete(id);
+  }
+  for (const [id, item] of stuckMessageIds) {
+    if (agora - item.at > STUCK_ID_TTL_MS) stuckMessageIds.delete(id);
+  }
+};
+
+setInterval(limparCachesDiagnostico, 10 * 60 * 1000).unref();
+
+// Registra o diagnóstico de mensagens brutas e a liberação de mensagem presa.
+// - CB:message: guarda o nó por id (antes da descriptografia) e libera ids presos.
+// - CB:stream:error: extrai o id do ACK cobrado e tenta liberar imediatamente.
+const registrarDiagnosticoRaw = (sock) => {
+  try {
+    const ws = sock?.ws;
+    if (!ws || typeof ws.on !== 'function') return;
+
+    ws.on('CB:message', (node) => {
+      const id = node?.attrs?.id;
+      if (!id) return;
+
+      rawMessageCache.set(id, { node, at: Date.now() });
+      if (rawMessageCache.size > RAW_MESSAGE_CACHE_MAX) {
+        const maisAntigo = rawMessageCache.keys().next().value;
+        if (maisAntigo) rawMessageCache.delete(maisAntigo);
+      }
+
+      if (DEBUG_RAW_MESSAGES) {
+        logger.info(`📥 [RAW] id=${id} from=${node.attrs.from || 'n/d'} type=${node.attrs.type || 'n/d'} participant=${node.attrs.participant || 'n/d'}`);
+      }
+
+      if (ACK_STUCK_MESSAGES && stuckMessageIds.has(id)) {
+        const meta = stuckMessageIds.get(id);
+        logger.warn(`🩹 [ACK] Tentando liberar mensagem presa id=${id} from=${node.attrs.from || 'n/d'} type=${node.attrs.type || 'n/d'} (${meta?.motivo || 'stream:error'}).`);
+        try {
+          Promise.resolve(sock.sendMessageAck(node))
+            .then(() => {
+              stuckMessageIds.delete(id);
+              logger.warn(`🩹 [ACK] Mensagem presa liberada id=${id} from=${node.attrs.from || 'n/d'} type=${node.attrs.type || 'n/d'}. Se for um cliente, peça para reenviar.`);
+            })
+            .catch((e) => {
+              logger.warn(`⚠️ [ACK] Falha ao liberar ${id}; tentarei na próxima reentrega: ${e.message}`);
+            });
+        } catch (e) {
+          logger.warn(`⚠️ [ACK] sendMessageAck indisponível para ${id}: ${e.message}`);
+        }
+      }
+    });
+
+    if (typeof ws.prependListener === 'function') {
+      ws.prependListener('CB:stream:error', (node) => {
+        const filhos = Array.isArray(node?.content) ? node.content : [];
+        const ackNode = filhos.find((c) => c?.tag === 'ack') || filhos[0] || null;
+        const id = ackNode?.attrs?.id || null;
+        if (!id) return;
+
+        const tipo = ackNode?.attrs?.type || null;
+        stuckMessageIds.set(id, { at: Date.now(), motivo: `stream:error${tipo ? ` (${tipo})` : ''}` });
+        if (stuckMessageIds.size > 100) {
+          const maisAntigo = stuckMessageIds.keys().next().value;
+          if (maisAntigo) stuckMessageIds.delete(maisAntigo);
+        }
+        logger.warn(`🧩 [ACK] Servidor cobrando ACK da mensagem id=${id}${tipo ? ` type=${tipo}` : ''}. ${ACK_STUCK_MESSAGES ? 'Liberando...' : 'ACK_STUCK_MESSAGES está desligado.'}`);
+
+        if (ACK_STUCK_MESSAGES) {
+          const emCache = rawMessageCache.get(id);
+          if (emCache?.node) {
+            logger.warn(`🩹 [ACK] Tentativa imediata de liberar id=${id} from=${emCache.node.attrs?.from || 'n/d'}.`);
+            try {
+              Promise.resolve(sock.sendMessageAck(emCache.node)).catch((e) => {
+                logger.warn(`⚠️ [ACK] Falha na liberação imediata de ${id}: ${e.message}`);
+              });
+            } catch (e) {
+              logger.warn(`⚠️ [ACK] sendMessageAck indisponível para ${id}: ${e.message}`);
+            }
+          }
+        }
+      });
+    }
+  } catch (e) {
+    logger.warn(`⚠️ [ACK] Não foi possível registrar o diagnóstico de stream: ${e.message}`);
+  }
+};
 
 // Agenda uma única reconexão, ignorando timers de sockets que já foram trocados.
 const scheduleReconnect = (delayMs, motivo = '') => {
@@ -779,6 +896,9 @@ const startSock = async (phoneOverride = null) => {
     },
   });
 
+  // Diagnóstico de mensagens brutas + liberação de mensagem presa (ACK).
+  registrarDiagnosticoRaw(sock);
+
   // Geração do Código de Pareamento
   if (!sock.authState.creds.registered) {
     isPairingInProgress = true;
@@ -986,12 +1106,10 @@ const startSock = async (phoneOverride = null) => {
         const fromMeRaw = incomingMessage.key.fromMe;
         const messageId = incomingMessage.key.id;
 
-        logger.info(`📩 [DEBUG INICIAL] Mensagem upsert recebida`, {
-          fromMe: fromMeRaw,
+        const tipoBruto = incomingMessage.message ? Object.keys(incomingMessage.message)[0] : 'none';
+        logger.info(`📩 [DEBUG INICIAL] id=${messageId || 'n/d'} from=${senderJidRaw || 'n/d'} fromMe=${!!fromMeRaw} type=${tipoBruto}`, {
           upsertType: upsertType || 'unknown',
-          remoteJid: senderJidRaw,
           hasMessage: !!incomingMessage.message,
-          messageType: incomingMessage.message ? Object.keys(incomingMessage.message)[0] : 'none',
           timestamp: new Date().toISOString()
         });
 
