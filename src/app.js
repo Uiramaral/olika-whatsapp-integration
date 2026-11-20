@@ -446,12 +446,16 @@ app.post('/api/whatsapp/connect', requireAuth, async (req, res) => {
 // Enviar mensagem manualmente
 app.post('/api/whatsapp/send', requireAuth, async (req, res) => {
     try {
-        const { number, message, idempotencyKey } = req.body;
+        const { number, message, idempotencyKey, marcarLeitura, quotedMessageId } = req.body;
         if (!number || !message) {
             return res.status(400).json({ error: 'Número e mensagem são obrigatórios.' });
         }
 
-        const result = await sendMessage(number, message, { idempotencyKey });
+        const result = await sendMessage(number, message, {
+            idempotencyKey,
+            marcarLeitura: !!marcarLeitura,
+            quotedId: quotedMessageId || null
+        });
         res.json({
             success: true,
             number,

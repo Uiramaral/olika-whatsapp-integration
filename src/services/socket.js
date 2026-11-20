@@ -56,6 +56,8 @@ const ackTimeoutCounter = new NodeCache({ stdTTL: 600 });
 // Sem devolver a mensagem original, o WhatsApp não consegue retentar o envio e o
 // remetente vê "Aguardando mensagem. Essa ação pode levar alguns instantes."
 const messageStore = new NodeCache({ stdTTL: 3600, maxKeys: 5000, useClones: false });
+// Chave (key) da mensagem original, usada para responder citando no WhatsApp.
+const messageKeyStore = new NodeCache({ stdTTL: 3600, maxKeys: 5000, useClones: false });
 // Controle para não consultar/reenviar pre-keys a cada mensagem (evita roundtrip por envio)
 const preKeyCheckCache = new NodeCache({ stdTTL: 600 });
 // Indexa SOMENTE pelo id: o retry do WhatsApp pode referenciar a mensagem com
@@ -63,7 +65,10 @@ const preKeyCheckCache = new NodeCache({ stdTTL: 600 });
 const buildMessageKey = (key) => (key && key.id ? key.id : null);
 const storeMessage = (key, message) => {
   const storeKey = buildMessageKey(key);
-  if (storeKey && message) messageStore.set(storeKey, message);
+  if (storeKey && message) {
+    messageStore.set(storeKey, message);
+    messageKeyStore.set(storeKey, key);
+  }
 };
 const getStoredMessage = (key) => {
   const storeKey = buildMessageKey(key);
@@ -193,6 +198,10 @@ const IA_RESPONSE_TIMEOUT_MS = parseInt(process.env.IA_RESPONSE_TIMEOUT_MS, 10) 
 
 const softRestartCooldown = new NodeCache();
 const pendingAcks = new Map(); // messageId -> { timeout, jid }
+
+// Última mensagem recebida por contato: usada para marcar leitura quando um
+// atendente humano responde pela Central.
+const ultimasRecebidasPorJid = new Map(); // jid -> { id, at }
 let isSoftRestarting = false;
 
 const clearPendingSend = (id) => {
@@ -908,6 +917,9 @@ const startSock = async (phoneOverride = null) => {
         const senderJid = contato.jid;
         const senderIsAlternativeId = contato.isAlternativeId;
         const senderPhone = contato.phone;
+        if (incomingMessage.key?.id) {
+          ultimasRecebidasPorJid.set(senderJid, { id: incomingMessage.key.id, at: Date.now() });
+        }
         logger.info(`📞 [FILTRO 3] Mensagem válida de: ${senderPhone} (JID: ${senderJid})`);
 
     // Encaminhamento paralelo (n8n) removido: o fluxo é exclusivamente o oficial (Laravel).
@@ -1134,6 +1146,9 @@ const startSock = async (phoneOverride = null) => {
         }
       }
 
+      // O agente leu e respondeu: marca a mensagem recebida como lida (check azul para o cliente).
+      await marcarComoLida(senderJid, [incomingMessage.key.id]);
+
     } catch (error) {
       logger.error(`❌ ERRO NO FLUXO DE ORQUESTRAÇÃO: ${error.message}`);
 
@@ -1292,6 +1307,17 @@ const variacoesNumeroWhatsApp = (cleanPhone) => {
   return variacoes;
 };
 
+const marcarComoLida = async (jid, messageIds = []) => {
+  const ids = messageIds.filter(Boolean).map(String);
+  if (!globalSock || !isSocketConnected || !jid || ids.length === 0) return;
+  try {
+    await globalSock.readMessages(ids.map((id) => ({ remoteJid: jid, id, fromMe: false })));
+    logger.info(`👁️ [Leitura] ${ids.length} mensagem(ns) marcada(s) como lida(s) para ${jid}`);
+  } catch (e) {
+    logger.warn(`⚠️ [Leitura] Falha ao marcar como lida (${jid}): ${e.message}`);
+  }
+};
+
 const sendMessage = async (phone, message, options = {}) => {
   if (!globalSock || !isSocketConnected) throw new Error("Offline");
 
@@ -1336,6 +1362,18 @@ const sendMessage = async (phone, message, options = {}) => {
 
     systemSentCache.set(outgoingId, true);
     const sendOptions = { messageId: outgoingId };
+
+    // Resposta citando uma mensagem específica (somente quando solicitado pelo atendente).
+    if (options?.quotedId) {
+      const quotedKey = messageKeyStore.get(String(options.quotedId));
+      const quotedMessage = messageStore.get(String(options.quotedId));
+      if (quotedKey && quotedMessage) {
+        sendOptions.quoted = { key: quotedKey, message: quotedMessage };
+      } else {
+        logger.warn(`⚠️ [Citação] Mensagem original não encontrada (${options.quotedId}); enviando sem citação.`);
+      }
+    }
+
     const sent = await globalSock.sendMessage(destinoJid, { text: message }, sendOptions);
 
     if (sent?.key?.id) {
@@ -1344,6 +1382,15 @@ const sendMessage = async (phone, message, options = {}) => {
 
     if (cacheKey) {
       idempotencyCache.set(cacheKey, { messageId: sent?.key?.id || outgoingId, em: Date.now() });
+    }
+
+    // Resposta humana pela Central: marca como lida a última mensagem recebida do contato.
+    if (options?.marcarLeitura) {
+      const ultima = ultimasRecebidasPorJid.get(destinoJid);
+      if (ultima && Date.now() - ultima.at <= 24 * 60 * 60 * 1000) {
+        await marcarComoLida(destinoJid, [ultima.id]);
+        ultimasRecebidasPorJid.delete(destinoJid);
+      }
     }
 
     // 📦 Guarda para retry (getMessage) e monitora confirmação de entrega
@@ -1369,4 +1416,4 @@ process.on('unhandledRejection', (reason) => {
   logger.error('❌ UNHANDLED REJECTION (socket.js):', { reason: String(reason) });
 });
 
-module.exports = { sendMessage, startSock, isConnected, getCurrentPhone, forceLogout, disconnectSock, softRestart, getDiagnostics };
+module.exports = { sendMessage, marcarComoLida, startSock, isConnected, getCurrentPhone, forceLogout, disconnectSock, softRestart, getDiagnostics };
