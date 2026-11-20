@@ -1,10 +1,12 @@
+// Filtra o despejo de chaves da libsignal antes de qualquer require do Baileys.
+require('./utils/log_filter')();
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const NodeCache = require('node-cache');
 const authCache = new NodeCache({ stdTTL: 300 }); // Cache de 5 minutos
-const { startSock, sendMessage, isConnected, forceLogout, getCurrentPhone, softRestart, getDiagnostics } = require('./services/socket');
+const { startSock, sendMessage, isConnected, forceLogout, getCurrentPhone, softRestart, getDiagnostics, shutdownSocket } = require('./services/socket');
 const logger = require('./config/logger');
 
 const app = express();
@@ -306,12 +308,14 @@ async function getWhatsAppPhone() {
     }
 }
 
-// Endpoint para desconectar WhatsApp manualmente (Logout)
+// Endpoint para desconectar WhatsApp manualmente.
+// Por padrão mantém o aparelho vinculado; use { "unlink": true } para desvincular.
 app.post('/api/whatsapp/disconnect', requireAuth, async (req, res) => {
     try {
-        logger.info('🔌 Solicitação de desconexão manual recebida');
+        const unlink = req.body?.unlink === true || req.query?.unlink === 'true';
+        logger.info(`🔌 Solicitação de desconexão manual recebida (${unlink ? 'desvincular' : 'manter credenciais'})`);
         const { disconnectSock } = require('./services/socket');
-        const result = await disconnectSock();
+        const result = await disconnectSock({ unlink });
         res.json(result);
     } catch (error) {
         logger.error('Erro ao desconectar, forçando logout:', error);
@@ -804,22 +808,14 @@ let server = null;
 // --- Bloco de Graceful Shutdown ---
 const gracefulShutdown = async (signal) => {
     logger.info(`\n\n🛑 Sinal ${signal} recebido. Iniciando Graceful Shutdown...`);
-    
-    // 1. Tenta desconectar o WhatsApp de forma limpa
-    if (global.sock) {
-        logger.info('🔗 Encerrando conexão Baileys (logout)...');
-        try {
-            await global.sock.logout(); // Tenta o logout limpo
-            logger.info('✅ Baileys desconectado e credenciais salvas.');
-        } catch (error) {
-            // Se falhar, tenta encerrar o socket de qualquer forma
-            logger.error('⚠️ Falha no logout Baileys, tentando encerrar o socket:', error.message);
-            try {
-                await global.sock.end();
-            } catch (e) {
-                logger.error('⚠️ Erro ao encerrar socket:', e.message);
-            }
-        }
+
+    // 1. Encerra o socket SEM logout: logout desvincula o aparelho e exigiria
+    // novo pareamento a cada deploy. As credenciais locais são preservadas.
+    try {
+        await shutdownSocket();
+        logger.info('✅ Baileys encerrado (credenciais preservadas).');
+    } catch (error) {
+        logger.error(`⚠️ Falha ao encerrar o Baileys: ${error.message}`);
     }
     
     // 2. Fecha o servidor HTTP para novas conexões

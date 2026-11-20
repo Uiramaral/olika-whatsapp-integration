@@ -170,11 +170,23 @@ let disconnectWebhookTimer = null;
 
 // 🔥 Contador de falhas e limite
 let consecutiveFailures = 0;
-const MAX_FAILURES = 3;
+const MAX_FAILURES = 5;
 
 // 🆕 Flag para evitar reconexões duplicadas e controlar estado de pareamento
 let isConnecting = false;
 let isPairingInProgress = false;
+
+// 🔁 Reconexão controlada: um timer por vez, geração do socket e backoff.
+// A geração impede que eventos de um socket antigo derrubem o socket novo.
+let reconnectTimer = null;
+let socketGeneration = 0;
+let reconnectAttempts = 0;
+let manualStop = false;
+let lastDisconnectInfo = null;
+let baileysVersion = null;
+const RECONNECT_BASE_MS = parseInt(process.env.RECONNECT_BASE_MS, 10) || 3000;
+const RECONNECT_MAX_MS = parseInt(process.env.RECONNECT_MAX_MS, 10) || 60000;
+const WATCHDOG_INTERVAL_MS = parseInt(process.env.WATCHDOG_INTERVAL_MS, 10) || 60000;
 
 // 🗺️ Mapa LID → JID real (protocolo WhatsApp LID)
 // O WhatsApp usa LIDs (@lid) em vez de JIDs (@s.whatsapp.net) para remetentes externos
@@ -286,7 +298,50 @@ const getDiagnostics = () => ({
   isSoftRestarting,
   currentPhone: currentPhone || null,
   pendingAcks: pendingAcks.size,
+  reconnectAttempts,
+  lastDisconnect: lastDisconnectInfo,
+  authDir: BASE_AUTH_DIR,
 });
+
+// Agenda uma única reconexão, ignorando timers de sockets que já foram trocados.
+const scheduleReconnect = (delayMs, motivo = '') => {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  const generation = socketGeneration;
+  const delay = Math.max(0, delayMs);
+
+  logger.warn(`🔄 [Conexão] Reconectando em ${(delay / 1000).toFixed(1)}s${motivo ? ` (${motivo})` : ''}...`);
+
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (generation !== socketGeneration) return; // uma conexão mais nova já assumiu
+    if (!isSocketConnected && currentPhone) {
+      startSock(currentPhone).catch((e) => {
+        isConnecting = false;
+        global.isConnecting = false;
+        logger.error(`❌ [Conexão] Falha ao reconectar: ${e.message}`);
+      });
+    }
+  }, delay);
+};
+
+// Vigia: se o WebSocket morrer sem emitir "close", reinicia a sessão.
+setInterval(() => {
+  if (!isSocketConnected || !globalSock || manualStop || isSoftRestarting) return;
+
+  try {
+    const ws = globalSock.ws;
+    if (ws && typeof ws.isOpen === 'boolean' && !ws.isOpen) {
+      logger.warn('⚠️ [Watchdog] WebSocket fechado com sessão marcada como conectada; reiniciando.');
+      softRestart('watchdog-ws');
+    }
+  } catch (e) {
+    logger.warn(`⚠️ [Watchdog] Falha ao inspecionar o socket: ${e.message}`);
+  }
+}, WATCHDOG_INTERVAL_MS).unref();
 
 // Extrai o JID de telefone real a partir dos campos alternativos que o Baileys
 // expõe nos keys (@lid). Retorna null quando não há telefone disponível.
@@ -621,6 +676,14 @@ const tratarMensagemHumanaExterna = async (incomingMessage, upsertType) => {
 
 // --- Função Core: Start do Socket ---
 const startSock = async (phoneOverride = null) => {
+  // Cancela reconexões pendentes e invalida eventos de sockets antigos.
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  manualStop = false;
+  const generation = ++socketGeneration;
+
   const phoneToUse = phoneOverride || loadConfig(); // Sem fallback para .env
 
   if (!phoneToUse) {
@@ -628,6 +691,8 @@ const startSock = async (phoneOverride = null) => {
     globalSock = null;
     isSocketConnected = false;
     currentPhone = null;
+    isConnecting = false;
+    global.isConnecting = false;
     return null;
   }
 
@@ -636,15 +701,42 @@ const startSock = async (phoneOverride = null) => {
     saveConfig(currentPhone);
   }
 
+  isConnecting = true;
+  global.isConnecting = true;
+
   const sessionPath = path.join(BASE_AUTH_DIR, currentPhone);
   if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
 
-  const { version } = await fetchLatestBaileysVersion();
+  if (generation !== socketGeneration) return null;
+
+  const arquivosSessao = (() => {
+    try { return fs.readdirSync(sessionPath).length; } catch { return 0; }
+  })();
+  logger.info(`🔐 [Auth] Sessão em ${sessionPath} (${arquivosSessao} arquivo(s)).`);
+  if (arquivosSessao === 0) {
+    logger.warn('⚠️ [Auth] Pasta de sessão vazia. Sem volume persistente, todo deploy exigirá novo pareamento.');
+  }
+
+  // A versão do WhatsApp Web muda pouco; busca uma vez por processo e evita
+  // que uma falha de rede impeça a criação do socket.
+  if (!baileysVersion) {
+    try {
+      ({ version: baileysVersion } = await fetchLatestBaileysVersion());
+    } catch (e) {
+      logger.warn(`⚠️ [Baileys] Falha ao buscar versão (${e.message}); usando a versão padrão da biblioteca.`);
+    }
+  }
+  const version = baileysVersion;
+
+  if (generation !== socketGeneration) return null;
+
   const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+
+  if (generation !== socketGeneration) return null;
 
   if (globalSock) { try { globalSock.end(); } catch { } }
 
-  console.log(`🚀 Iniciando Socket para: ${currentPhone} (v${version.join(".")})`);
+  console.log(`🚀 Iniciando Socket para: ${currentPhone} (v${(version || []).join(".") || 'padrão'})`);
 
   const sock = makeWASocket({
     version,
@@ -729,6 +821,9 @@ const startSock = async (phoneOverride = null) => {
 
   // Monitoramento de Conexão
   sock.ev.on("connection.update", async (update) => {
+    // Ignora eventos de um socket que já foi substituído.
+    if (generation !== socketGeneration) return;
+
     const { connection, lastDisconnect } = update;
 
     if (connection === "open") {
@@ -740,6 +835,8 @@ const startSock = async (phoneOverride = null) => {
       isPairingInProgress = false;
       global.currentPairingCode = null;
       consecutiveFailures = 0;
+      reconnectAttempts = 0;
+      lastDisconnectInfo = null;
 
       // Cancela webhook pendente de desconexão se reconectou dentro da janela de debounce
       if (disconnectWebhookTimer) {
@@ -764,15 +861,37 @@ const startSock = async (phoneOverride = null) => {
       isConnecting = false;
       global.isConnecting = false; // ✅ Libera o flag global em qualquer desconexão
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      const motivoReal = lastDisconnect?.error?.message
+        || lastDisconnect?.error?.output?.payload?.message
+        || null;
+      const noDoErro = lastDisconnect?.error?.data || null;
+
+      lastDisconnectInfo = {
+        code: reason ?? null,
+        message: motivoReal,
+        ackId: noDoErro?.attrs?.id || null,
+        at: new Date().toISOString(),
+      };
+
+      logger.warn(`📉 [Conexão] Fechada (${reason ?? 'n/d'})${motivoReal ? `: ${motivoReal}` : ''}${lastDisconnectInfo.ackId ? ` | id=${lastDisconnectInfo.ackId}` : ''}`);
+
+      if (manualStop) {
+        manualStop = false;
+        logger.info('⏹️ [Conexão] Fechamento manual; reconexão automática desativada.');
+        return;
+      }
 
       // Erros comuns e esperados durante pareamento e restarts do WhatsApp Web (Meta)
       const isTransientOrPairing = [500, 515, 408, 428, 503].includes(reason) || isPairingInProgress || !sock.authState.creds.registered;
 
       if (isTransientOrPairing) {
-        console.log(`⚠️ Desconexão transitória ou de pareamento (${reason}). Mantendo credenciais.`);
+        if (reason === 500 && /ack/i.test(motivoReal || '')) {
+          logger.warn('⚠️ [Baileys] Stream derrubado por falta de ACK (bug conhecido da lib). O patch de ACK deve evitar este ciclo.');
+        }
+        console.log(`⚠️ Desconexão transitória ou de pareamento (${reason}${motivoReal ? ` - ${motivoReal}` : ''}). Mantendo credenciais.`);
       } else {
         consecutiveFailures++;
-        console.log(`🔴 Desconectado (${reason}). Falhas consecutivas: ${consecutiveFailures}/5.`);
+        console.log(`🔴 Desconectado (${reason}${motivoReal ? ` - ${motivoReal}` : ''}). Falhas consecutivas: ${consecutiveFailures}/${MAX_FAILURES}.`);
       }
 
       // Webhook de Status para o Laravel com debounce (8s) para amortecer reconexões transitórias
@@ -790,8 +909,20 @@ const startSock = async (phoneOverride = null) => {
         }
       }, 8000);
 
-      // LOGOUT MANUAL DETECTADO (401) OU LIMITE DE 5 FALHAS CONSECUTIVAS EM PRODUÇÃO
-      if (reason === DisconnectReason.loggedOut || consecutiveFailures >= 5) {
+      // Outra instância assumiu a sessão: não brigar por ela em loop.
+      if (reason === DisconnectReason.connectionReplaced) {
+        logger.error('🚨 [Conexão] Sessão assumida por outra instância (440). Aguardando 90s antes de tentar novamente.');
+        axios.post(WEBHOOK_URL, {
+          type: 'shutdown_alert',
+          instance_phone: currentPhone,
+          reason: 'CONNECTION_REPLACED'
+        }).catch(() => { });
+        scheduleReconnect(90000, 'connectionReplaced');
+        return;
+      }
+
+      // LOGOUT MANUAL DETECTADO (401) OU LIMITE DE FALHAS CONSECUTIVAS EM PRODUÇÃO
+      if (reason === DisconnectReason.loggedOut || consecutiveFailures >= MAX_FAILURES) {
         if (disconnectWebhookTimer) {
           clearTimeout(disconnectWebhookTimer);
           disconnectWebhookTimer = null;
@@ -819,6 +950,7 @@ const startSock = async (phoneOverride = null) => {
         globalSock = null;
         global.currentPairingCode = null;
         consecutiveFailures = 0;
+        reconnectAttempts = 0;
         isConnecting = false;
         isPairingInProgress = false;
 
@@ -829,14 +961,14 @@ const startSock = async (phoneOverride = null) => {
           console.log("🔄 Reset automático executado. Aguardando novo comando /connect.");
         }
       } else {
-        // Reconexão suave com debounce de 3 segundos para evitar loops de concorrência
-        const phoneToReconnect = currentPhone;
-        console.log("🔄 Reconectando socket em 3s...");
-        setTimeout(() => {
-          if (!isSocketConnected && phoneToReconnect) {
-            startSock(phoneToReconnect);
-          }
-        }, 3000);
+        // Backoff exponencial com jitter: 3s, 6s, 12s... até 60s.
+        // Em um ciclo normal (abriu e caiu depois de muito tempo) a tentativa
+        // volta a zero no "open", então a primeira reconexão continua em ~3s.
+        const tentativa = reconnectAttempts;
+        reconnectAttempts += 1;
+        const base = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * Math.pow(2, Math.min(tentativa, 5)));
+        const delay = base + Math.floor(Math.random() * 500);
+        scheduleReconnect(delay, `tentativa ${tentativa + 1}`);
       }
     }
   });
@@ -1220,9 +1352,24 @@ const startSock = async (phoneOverride = null) => {
 const forceLogout = async () => {
   console.log("🚨 RESET MANUAL INICIADO!");
 
+  manualStop = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   global.isConnecting = false; // ✅ Libera o flag global (permite novo /connect após reset)
 
   if (globalSock) {
+    // Desvincula o aparelho para não deixar dispositivo fantasma na lista do celular.
+    // Timeout curto: um socket morto não pode travar o reset.
+    if (isSocketConnected) {
+      try {
+        await Promise.race([
+          Promise.resolve(globalSock.logout()),
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
+      } catch { }
+    }
     try { globalSock.end(); } catch { }
     globalSock = null;
     isSocketConnected = false;
@@ -1242,34 +1389,50 @@ const forceLogout = async () => {
   return { success: true, message: "Sessão resetada. Chame /connect para novo pareamento." };
 };
 
-// Desconecta a instância sem deletar credenciais
-const disconnectSock = async () => {
-  console.log("🔴 DESCONEXÃO INICIADA!");
+// Desconecta a instância. Por padrão mantém o aparelho vinculado (credenciais preservadas).
+// Use { unlink: true } para desvincular o aparelho e apagar a sessão (novo pareamento).
+const disconnectSock = async ({ unlink = false } = {}) => {
+  if (unlink) {
+    const result = await forceLogout();
+    return {
+      success: true,
+      message: 'Desconectado e aparelho desvinculado. Chame /connect para um novo pareamento.',
+      unlinked: true,
+      ...result,
+    };
+  }
 
+  console.log('🔴 DESCONEXÃO INICIADA! (manter credenciais)');
+
+  manualStop = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   global.isConnecting = false; // ✅ Libera o flag global ao desconectar manualmente
 
   if (!globalSock) {
+    manualStop = false;
     console.warn('⚠️  Socket já está desconectado');
-    return { success: true, message: 'Já desconectado' };
+    return { success: true, message: 'Já desconectado', unlinked: false };
   }
 
+  const sock = globalSock;
   try {
-    // 1. Fazer logout para invalidar a sessão no WhatsApp
-    await globalSock.logout();
-    console.log('✅ Logout realizado');
+    // Fecha a conexão mantendo as credenciais locais.
+    try { sock.end(); } catch { }
+    try { if (sock.ws) sock.ws.close(); } catch { }
 
-    // 2. Fechar conexão
-    if (globalSock.ws) {
-      globalSock.ws.close();
-    }
-    globalSock.end();
-
-    // 3. Limpar referência global (mas NÃO deletar credenciais)
+    // Limpar referência global (mas NÃO deletar credenciais)
     globalSock = null;
     isSocketConnected = false;
-    console.log('✅ Instância desconectada completamente');
+    console.log('✅ Instância desconectada');
 
-    return { success: true, message: 'Desconectado com sucesso' };
+    return {
+      success: true,
+      message: 'Desconectado (credenciais preservadas).',
+      unlinked: false,
+    };
   } catch (error) {
     console.error(`❌ Erro ao desconectar: ${error.message}`);
     // Forçar limpeza mesmo com erro
@@ -1282,7 +1445,13 @@ const disconnectSock = async () => {
 // Inicialização: Tenta startar, se não tiver config, entra em STANDBY
 (async () => {
   setTimeout(async () => {
-    await startSock();
+    try {
+      await startSock();
+    } catch (e) {
+      isConnecting = false;
+      global.isConnecting = false;
+      logger.error(`❌ [Boot] Falha ao iniciar o socket: ${e.message}`);
+    }
   }, 500);
 })();
 
@@ -1416,4 +1585,24 @@ process.on('unhandledRejection', (reason) => {
   logger.error('❌ UNHANDLED REJECTION (socket.js):', { reason: String(reason) });
 });
 
-module.exports = { sendMessage, marcarComoLida, startSock, isConnected, getCurrentPhone, forceLogout, disconnectSock, softRestart, getDiagnostics };
+// Encerra o socket sem desvincular o aparelho (usado no SIGTERM/deploy).
+const shutdownSocket = async () => {
+  manualStop = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  const sock = globalSock;
+  globalSock = null;
+  isSocketConnected = false;
+  isConnecting = false;
+  global.isConnecting = false;
+
+  if (sock) {
+    try { sock.end(); } catch { }
+    try { if (sock.ws) sock.ws.close(); } catch { }
+  }
+};
+
+module.exports = { sendMessage, marcarComoLida, startSock, isConnected, getCurrentPhone, forceLogout, disconnectSock, softRestart, getDiagnostics, shutdownSocket };

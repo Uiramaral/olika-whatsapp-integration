@@ -5,6 +5,8 @@
   "main": "src/app.js",
   "scripts": {
     "start": "node src/app.js",
+    "postinstall": "node scripts/patch-baileys.js",
+    "patch:check": "node scripts/patch-baileys.js --check",
     "get-token": "node scripts/getRailwayToken.js",
     "get-token:install": "npm install -g @railway/cli && node scripts/getRailwayToken.js"
   },
