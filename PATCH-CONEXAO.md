@@ -35,12 +35,14 @@ sessão corrompida. O gateway reconectava em 3s e o ciclo se repetia para sempre
 persistir `/app/auth_info_baileys` sozinho. Sem o volume, todo deploy ainda perde a
 sessão.
 
-O caminho de montagem ideal é **`/app/auth_info_baileys`** (a pasta pai). Se o
-volume for montado em `/app/auth_info_baileys/5571987019420` (a pasta da sessão),
-o `session_config.json` fica fora do volume e o container sobe em STANDBY. Para
-cobrir esse caso, `loadConfig()` agora procura a pasta mais recente com
-`creds.json` e recria o `session_config.json` no boot, reutilizando a sessão
-existente. Ainda assim, corrigir o mount para a pasta pai é o recomendado.
+O `session_config.json` é o único arquivo fora da pasta da sessão. Ele pode
+faltar por dois motivos: (a) o volume está montado na pasta da sessão
+(`/app/auth_info_baileys/5571987019420`) em vez da pasta pai; ou (b) um reset
+(`clear-auth`/logout) apagou o arquivo e o `startSock` não o recriou porque o
+número em memória não mudou. O `startSock` agora recria o config sempre que ele
+estiver ausente, e `loadConfig()` ainda tem o fallback que encontra a pasta com
+`creds.json`. O caminho ideal do volume continua sendo `/app/auth_info_baileys`,
+mas o mount atual funciona.
 
 ### 3. Robustez da reconexão
 
@@ -76,18 +78,22 @@ e descarta esses blocos. O pino silencioso não cobre esse caminho.
 ### 5. Mensagem presa (stream errored ack)
 
 O log de 20/11 mostrou um caso diferente do ACK geral: o servidor cobrava o ACK de
-**sempre o mesmo id** (`3A115F55…`) a cada ~50 min. Essa mensagem não aparece no
+**sempre o mesmo id** a cada ~50 min. Essa mensagem não aparece no
 `messages.upsert` — ou seja, o Baileys não conseguiu descriptografá-la, mandou
 retry/NACK e o servidor continuou com ela pendente. A correção do ACK de sucesso
 não alcança esse caminho.
 
 O gateway agora:
 
-- guarda o nó bruto de cada `CB:message` por 2h (até 5.000 mensagens);
+- guarda os metadados de cada `CB:message` (tag + attrs, **sem o conteúdo/mídia**)
+  por 12h, até 10.000 mensagens;
 - escuta `CB:stream:error` **antes** do Baileys encerrar o socket e extrai o id
-  do ACK cobrado;
+  do ACK cobrado, logando também os `attrs` do `<ack>` e do nó pai;
 - tenta liberar a mensagem imediatamente (se o nó estiver no cache) e, na próxima
   reentrega, envia o ACK de sucesso para o mesmo id — o servidor para de cobrar;
+- se não houver nó bruto mas o `<ack>` trouxer `from`, tenta um ACK sintético;
+- se não houver nó nem `from`, registra que não há como montar um ACK válido e
+  aguarda a reentrega/expiração do servidor;
 - registra no log o `from`/`type` da mensagem liberada.
 
 Logs esperados:
@@ -95,8 +101,15 @@ Logs esperados:
 ```
 🧩 [Baileys] Patch de ACK: aplicado
 🩹 [ACK] Liberação de mensagem presa: ativa.
-🧩 [ACK] Servidor cobrando ACK da mensagem id=... type=text. Liberando...
+🧩 [ACK] Servidor cobrando ACK da mensagem id=... type=text | ackAttrs={...} | nodeAttrs={...}
+🩹 [ACK] Tentativa imediata de liberar id=... from=...
 🩹 [ACK] Mensagem presa liberada id=... from=... type=text (...). Se for um cliente, peça para reenviar.
+```
+
+Quando não há nó bruto:
+
+```
+🧩 [ACK] Sem nó bruto e sem "from" no <ack> para id=...; aguardando reentrega ou expiração do servidor. Não há como montar um ACK válido sem o remetente.
 ```
 
 Flags:
@@ -110,6 +123,8 @@ Flags:
 
 Trade-off: a mensagem presa já está indescritografável e perdida; o ACK só
 destrava o servidor. O log traz o `from` para avisar o contato e pedir reenvio.
+Quando o servidor não reentrega e o `<ack>` não traz `from`, não existe ACK
+válido possível; o ciclo só termina quando o WhatsApp expira a pendência.
 
 ## Deploy
 
@@ -124,8 +139,9 @@ destrava o servidor. O log traz o `from` para avisar o contato e pedir reenvio.
    🔐 [Auth] Sessão em /app/auth_info_baileys/5571987019420 (N arquivo(s)).
    ✅ 5571987019420 CONECTADO!
    ```
-   **Sem** `MODO STANDBY`. Se aparecer STANDBY, o volume não está montado no caminho
-   correto.
+   **Sem** `MODO STANDBY`. Se aparecer STANDBY, veja se a pasta da sessão existe
+   no volume e se o `session_config.json` está presente; o fallback de
+   `loadConfig` deve encontrar a pasta com `creds.json`.
 4. Se ainda não houver sessão no volume, pareie uma última vez. A partir daí ela
    deve sobreviver aos deploys.
 

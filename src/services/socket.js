@@ -225,9 +225,9 @@ const patchAckAplicado = (() => {
 const DEBUG_RAW_MESSAGES = process.env.DEBUG_RAW_MESSAGES === 'true';
 const ACK_STUCK_MESSAGES = patchAckAplicado
   && !['false', '0', 'off'].includes(String(process.env.ACK_STUCK_MESSAGES || '').toLowerCase());
-const RAW_MESSAGE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
-const RAW_MESSAGE_CACHE_MAX = 5000;
-const STUCK_ID_TTL_MS = 6 * 60 * 60 * 1000;
+const RAW_MESSAGE_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const RAW_MESSAGE_CACHE_MAX = 10000;
+const STUCK_ID_TTL_MS = 12 * 60 * 60 * 1000;
 const rawMessageCache = new Map(); // id -> { node, at }
 const stuckMessageIds = new Map(); // id -> { at, motivo }
 
@@ -357,7 +357,13 @@ const registrarDiagnosticoRaw = (sock) => {
       const id = node?.attrs?.id;
       if (!id) return;
 
-      rawMessageCache.set(id, { node, at: Date.now() });
+      // Guarda só o necessário para o ACK (tag + attrs), sem o conteúdo/mídia.
+      const noAck = {
+        tag: node.tag || 'message',
+        attrs: { ...(node.attrs || {}) },
+        content: [],
+      };
+      rawMessageCache.set(id, { node: noAck, at: Date.now() });
       if (rawMessageCache.size > RAW_MESSAGE_CACHE_MAX) {
         const maisAntigo = rawMessageCache.keys().next().value;
         if (maisAntigo) rawMessageCache.delete(maisAntigo);
@@ -371,7 +377,7 @@ const registrarDiagnosticoRaw = (sock) => {
         const meta = stuckMessageIds.get(id);
         logger.warn(`🩹 [ACK] Tentando liberar mensagem presa id=${id} from=${node.attrs.from || 'n/d'} type=${node.attrs.type || 'n/d'} (${meta?.motivo || 'stream:error'}).`);
         try {
-          Promise.resolve(sock.sendMessageAck(node))
+          Promise.resolve(sock.sendMessageAck(noAck))
             .then(() => {
               stuckMessageIds.delete(id);
               logger.warn(`🩹 [ACK] Mensagem presa liberada id=${id} from=${node.attrs.from || 'n/d'} type=${node.attrs.type || 'n/d'}. Se for um cliente, peça para reenviar.`);
@@ -393,26 +399,65 @@ const registrarDiagnosticoRaw = (sock) => {
         if (!id) return;
 
         const tipo = ackNode?.attrs?.type || null;
+        const attrsAck = ackNode?.attrs || {};
+        const attrsNo = node?.attrs || {};
         stuckMessageIds.set(id, { at: Date.now(), motivo: `stream:error${tipo ? ` (${tipo})` : ''}` });
         if (stuckMessageIds.size > 100) {
           const maisAntigo = stuckMessageIds.keys().next().value;
           if (maisAntigo) stuckMessageIds.delete(maisAntigo);
         }
-        logger.warn(`🧩 [ACK] Servidor cobrando ACK da mensagem id=${id}${tipo ? ` type=${tipo}` : ''}. ${ACK_STUCK_MESSAGES ? 'Liberando...' : 'ACK_STUCK_MESSAGES está desligado.'}`);
 
-        if (ACK_STUCK_MESSAGES) {
-          const emCache = rawMessageCache.get(id);
-          if (emCache?.node) {
-            logger.warn(`🩹 [ACK] Tentativa imediata de liberar id=${id} from=${emCache.node.attrs?.from || 'n/d'}.`);
-            try {
-              Promise.resolve(sock.sendMessageAck(emCache.node)).catch((e) => {
-                logger.warn(`⚠️ [ACK] Falha na liberação imediata de ${id}: ${e.message}`);
-              });
-            } catch (e) {
-              logger.warn(`⚠️ [ACK] sendMessageAck indisponível para ${id}: ${e.message}`);
-            }
-          }
+        logger.warn(`🧩 [ACK] Servidor cobrando ACK da mensagem id=${id}${tipo ? ` type=${tipo}` : ''} | ackAttrs=${JSON.stringify(attrsAck)} | nodeAttrs=${JSON.stringify(attrsNo)}`);
+
+        if (!ACK_STUCK_MESSAGES) {
+          logger.warn('⚠️ [ACK] ACK_STUCK_MESSAGES está desligado; apenas registrando o id.');
+          return;
         }
+
+        const emCache = rawMessageCache.get(id);
+        if (emCache?.node) {
+          logger.warn(`🩹 [ACK] Tentativa imediata de liberar id=${id} from=${emCache.node.attrs?.from || 'n/d'}.`);
+          try {
+            Promise.resolve(sock.sendMessageAck(emCache.node)).catch((e) => {
+              logger.warn(`⚠️ [ACK] Falha na liberação imediata de ${id}: ${e.message}`);
+            });
+          } catch (e) {
+            logger.warn(`⚠️ [ACK] sendMessageAck indisponível para ${id}: ${e.message}`);
+          }
+          return;
+        }
+
+        // O <ack> do stream:error nem sempre traz "from"; sem o remetente não
+        // há como montar um ACK válido. Quando vier, tentamos um ACK sintético.
+        if (attrsAck.from) {
+          const noSintetico = {
+            tag: 'message',
+            attrs: {
+              id,
+              from: attrsAck.from,
+              ...(attrsAck.participant ? { participant: attrsAck.participant } : {}),
+              ...(attrsAck.recipient ? { recipient: attrsAck.recipient } : {}),
+              ...(attrsAck.type ? { type: attrsAck.type } : {}),
+            },
+            content: [],
+          };
+          logger.warn(`🩹 [ACK] Sem nó bruto; tentando ACK sintético id=${id} from=${attrsAck.from}.`);
+          try {
+            Promise.resolve(sock.sendMessageAck(noSintetico))
+              .then(() => {
+                stuckMessageIds.delete(id);
+                logger.warn(`🩹 [ACK] ACK sintético enviado id=${id} from=${attrsAck.from}.`);
+              })
+              .catch((e) => {
+                logger.warn(`⚠️ [ACK] Falha no ACK sintético de ${id}: ${e.message}`);
+              });
+          } catch (e) {
+            logger.warn(`⚠️ [ACK] sendMessageAck indisponível para ${id}: ${e.message}`);
+          }
+          return;
+        }
+
+        logger.warn(`🧩 [ACK] Sem nó bruto e sem "from" no <ack> para id=${id}; aguardando reentrega ou expiração do servidor. Não há como montar um ACK válido sem o remetente.`);
       });
     }
   } catch (e) {
@@ -844,7 +889,7 @@ const startSock = async (phoneOverride = null) => {
     return null;
   }
 
-  if (currentPhone !== phoneToUse) {
+  if (currentPhone !== phoneToUse || !fs.existsSync(CONFIG_FILE)) {
     currentPhone = phoneToUse;
     saveConfig(currentPhone);
   }
@@ -1127,6 +1172,9 @@ const startSock = async (phoneOverride = null) => {
         } else {
           console.log("🔄 Reset automático executado. Aguardando novo comando /connect.");
         }
+
+        // Sem número em memória: o próximo /connect reescreve o session_config.json.
+        currentPhone = null;
       } else {
         // Backoff exponencial com jitter: 3s, 6s, 12s... até 60s.
         // Em um ciclo normal (abriu e caiu depois de muito tempo) a tentativa
@@ -1549,6 +1597,7 @@ const forceLogout = async () => {
   }
 
   removeConfig(); // APAGA A CONFIG DE NÚMERO
+  currentPhone = null;
 
   // Não chama startSock() aqui, deixa o sistema em STANDBY
   return { success: true, message: "Sessão resetada. Chame /connect para novo pareamento." };
