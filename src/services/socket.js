@@ -21,6 +21,54 @@ const BASE_AUTH_DIR = path.resolve(__dirname, "..", "..", "auth_info_baileys");
 const CONFIG_FILE = path.join(BASE_AUTH_DIR, "session_config.json");
 const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://devpedido.menuolika.com.br/api/whatsapp/webhook";
 
+// 📲 Alerta ao administrador quando um cliente manda mensagem.
+// Cooldown persistido em arquivo (sobrevive a reinícios) e por contato normalizado.
+const ADMIN_NOTIFY_PHONE = process.env.ADMIN_NOTIFY_PHONE || '5571981750546';
+const ADMIN_NOTIFY_COOLDOWN = parseInt(process.env.ADMIN_NOTIFY_COOLDOWN, 10) || 1800; // 30 minutos
+const ADMIN_COOLDOWN_FILE = path.join(BASE_AUTH_DIR, 'admin_notify_cooldown.json');
+const adminNotifyCooldownCache = new NodeCache();
+
+const lerCooldownsAdmin = () => {
+  try {
+    if (fs.existsSync(ADMIN_COOLDOWN_FILE)) {
+      return JSON.parse(fs.readFileSync(ADMIN_COOLDOWN_FILE, 'utf8')) || {};
+    }
+  } catch (e) {
+    logger.warn(`⚠️ [Alerta Admin] Falha ao ler cooldown persistido: ${e.message}`);
+  }
+  return {};
+};
+
+const gravarCooldownsAdmin = (mapa) => {
+  try {
+    fs.writeFileSync(ADMIN_COOLDOWN_FILE, JSON.stringify(mapa), 'utf8');
+  } catch (e) {
+    logger.warn(`⚠️ [Alerta Admin] Falha ao gravar cooldown persistido: ${e.message}`);
+  }
+};
+
+const emCooldownAdmin = (chaveContato) => {
+  const agora = Date.now();
+  const mapa = lerCooldownsAdmin();
+  let alterou = false;
+
+  for (const [chave, expiraEm] of Object.entries(mapa)) {
+    if (!expiraEm || expiraEm <= agora) {
+      delete mapa[chave];
+      alterou = true;
+    }
+  }
+  if (alterou) gravarCooldownsAdmin(mapa);
+
+  return Boolean(mapa[chaveContato] && mapa[chaveContato] > agora);
+};
+
+const registrarCooldownAdmin = (chaveContato) => {
+  const mapa = lerCooldownsAdmin();
+  mapa[chaveContato] = Date.now() + (ADMIN_NOTIFY_COOLDOWN * 1000);
+  gravarCooldownsAdmin(mapa);
+};
+
 // ✅ NOVO: Variáveis para multi-instância
 const CLIENT_ID = process.env.CLIENT_ID;
 
@@ -1266,6 +1314,44 @@ const startSock = async (phoneOverride = null) => {
           ultimasRecebidasPorJid.set(senderJid, { id: incomingMessage.key.id, at: Date.now() });
         }
         logger.info(`📞 [FILTRO 3] Mensagem válida de: ${senderPhone} (JID: ${senderJid})`);
+
+        // 📲 ALERTA AO ADMINISTRADOR COM JANELA DE SILÊNCIO (30 min por contato)
+        const adminPhoneClean = ADMIN_NOTIFY_PHONE.replace(/\D/g, '');
+        const cleanSenderPhone = senderPhone ? senderPhone.replace(/\D/g, '') : '';
+
+        // Evita loop se a mensagem for enviada pelo próprio administrador.
+        if (adminPhoneClean && cleanSenderPhone && !cleanSenderPhone.endsWith(adminPhoneClean.slice(-8))) {
+          // Chave canônica: normaliza o 9º dígito para o mesmo contato não gerar dois alertas.
+          const variacoes = variacoesNumeroWhatsApp(cleanSenderPhone);
+          const chaveContato = variacoes.slice().sort((a, b) => a.length - b.length)[0] || cleanSenderPhone;
+          const cooldownKey = `admin_notif_${chaveContato}`;
+
+          const jaNotificado = adminNotifyCooldownCache.get(cooldownKey) || emCooldownAdmin(cooldownKey);
+
+          if (!jaNotificado) {
+            adminNotifyCooldownCache.set(cooldownKey, true, ADMIN_NOTIFY_COOLDOWN);
+            registrarCooldownAdmin(cooldownKey);
+
+            const pushName = incomingMessage.pushName || 'Cliente';
+            const msgRaw = previewTextoMensagem(incomingMessage);
+            const msgResumo = msgRaw.length > 160 ? msgRaw.substring(0, 157) + '...' : msgRaw;
+            const cooldownMin = Math.round(ADMIN_NOTIFY_COOLDOWN / 60);
+
+            const alertaAdmin = `🔔 *Nova mensagem no WhatsApp da Olika*\n\n` +
+                                `👤 *Cliente:* ${pushName}${senderIsAlternativeId ? ' (ID alternativo)' : ` (${cleanSenderPhone})`}\n` +
+                                `💬 *Mensagem:* "${msgResumo}"\n\n` +
+                                `_Próximos avisos deste número silenciados por ${cooldownMin} min._`;
+
+            logger.info(`📲 [Alerta Admin] Notificando ${adminPhoneClean} sobre primeira mensagem de ${cleanSenderPhone}...`);
+
+            // Disparo assíncrono (sem bloquear o processamento da IA ou webhooks).
+            sendMessage(adminPhoneClean, alertaAdmin)
+              .then(() => logger.info(`✅ [Alerta Admin] Alerta entregue com sucesso para o administrador (${adminPhoneClean})!`))
+              .catch((err) => logger.warn(`⚠️ [Alerta Admin] Falha ao enviar alerta para ${adminPhoneClean}: ${err.message}`));
+          } else {
+            logger.info(`⏳ [Alerta Admin] Mensagem de ${cleanSenderPhone} em período de silêncio (cooldown de ${Math.round(ADMIN_NOTIFY_COOLDOWN / 60)} min ativo).`);
+          }
+        }
 
     // Encaminhamento paralelo (n8n) removido: o fluxo é exclusivamente o oficial (Laravel).
 
